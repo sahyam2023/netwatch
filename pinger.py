@@ -24,6 +24,9 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIcon
 from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFilterProxyModel
+import pyqtgraph as pg
+from sympy import true
+
 # --- Configuration ---
 MAX_IPS = 1000 # Increased limit
 PING_TIMEOUT_SEC = 2
@@ -66,6 +69,7 @@ class PingDataModel(QAbstractItemModel):
 
     # Define role for custom data (like status level for coloring)
     StatusLevelRole = Qt.UserRole + 1
+    PingTimeRole = Qt.UserRole + 2
 
     def __init__(self, headers, parent=None):
         super().__init__(parent)
@@ -368,6 +372,7 @@ class PingWorker(QObject):
                 if host_info.is_alive:
                     rtt = host_info.avg_rtt
                     status_key = "success_count"; status_level = "success"; message = f"Success ({rtt:.1f} ms)"
+                    self.ping_data["ping_time"] = rtt
                 else:
                     status_key = "timeouts"; status_level = "warning"; message = "Timeout"
 
@@ -737,11 +742,13 @@ class PingMonitorWindow(QMainWindow):
         self.scan_ports_button = QPushButton("Scan Ports"); self.scan_ports_button.setEnabled(False)
         self.traceroute_button = QPushButton("Traceroute"); self.traceroute_button.setEnabled(False)
         self.select_ips_button = QPushButton("Select IPs"); self.select_ips_button.setCheckable(True); self.select_ips_button.setEnabled(False)
+        self.show_graph_button = QPushButton("Show Graph"); self.show_graph_button.setEnabled(False)
         control_layout.addWidget(self.start_button); control_layout.addWidget(self.stop_button); control_layout.addWidget(self.save_button)
         control_layout.addWidget(self.save_filtered_button)
         control_layout.addWidget(self.save_selected_button)
         control_layout.addWidget(self.scan_ports_button)
         control_layout.addWidget(self.traceroute_button)
+        control_layout.addWidget(self.show_graph_button)
         control_layout.addStretch(1)
         control_layout.addWidget(self.select_ips_button)
         control_layout.addWidget(self.reset_button)
@@ -822,6 +829,19 @@ class PingMonitorWindow(QMainWindow):
         self.scan_ports_button.clicked.connect(self.start_port_scan)
         self.traceroute_button.clicked.connect(self.start_traceroute)
         self.single_port_scan_button.clicked.connect(self.start_single_port_scan)
+        self.show_graph_button.clicked.connect(self._open_graph_window)
+
+    def _open_graph_window(self):
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            QMessageBox.information(self, "No Selection", "Please select an IP to graph.")
+            return
+
+        source_index = self.proxy_model.mapToSource(selected_indexes[0])
+        ip_address = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
+        
+        self.graph_window = GraphWindow(ip_address)
+        self.graph_window.show()
 
     @Slot()
     def reset_application(self):
@@ -1244,6 +1264,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_selected_button.setEnabled(False)
         self.scan_ports_button.setEnabled(False)
         self.traceroute_button.setEnabled(False)
+        self.show_graph_button.setEnabled(True)
         self.select_ips_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
         self.api_ip_input.setEnabled(False); self.api_port_input.setEnabled(False); self.fetch_api_button.setEnabled(False)
@@ -1330,6 +1351,9 @@ class PingMonitorWindow(QMainWindow):
         else:
              # Fallback in case it wasn't initialized (should be rare)
              self.ping_results_data[ip] = data
+        
+        if hasattr(self, 'graph_window') and self.graph_window.ip_address == ip and "ping_time" in data:
+            self.graph_window.update_graph(data["ping_time"])
 
     @Slot()
     def _process_queued_updates(self):
@@ -1475,6 +1499,7 @@ class PingMonitorWindow(QMainWindow):
         self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
         self.scan_ports_button.setEnabled(True)
         self.traceroute_button.setEnabled(True)
+        self.show_graph_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
         self.add_range_button.setEnabled(True)
@@ -1556,7 +1581,7 @@ class PingMonitorWindow(QMainWindow):
         try:
             with open(log_filename, 'w', encoding='utf-8') as f:
                 f.write("="*70 + f"\n Ping Monitor Summary ({log_type_description.title()})\n" + "="*70 + "\n")
-                f.write(f"Generated:       {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Generated:       {datetime.datetime.now().strftime('%Y-%m-%d %H%M%S')}\n")
 
                 # Use the original list of monitored IPs for consistency
                 monitored_ips_list = getattr(self, 'ips_to_monitor', list(self.ping_results_data.keys()))
@@ -1782,6 +1807,31 @@ class PingMonitorWindow(QMainWindow):
             self._log_event_gui("Exiting application.", "info") # Direct log
             event.accept() # OK to close
 
+class GraphWindow(QMainWindow):
+    def __init__(self, ip_address, parent=None):
+        super().__init__(parent)
+        self.ip_address = ip_address
+        self.setWindowTitle(f"Ping Graph for {self.ip_address}")
+        self.setMinimumSize(800, 400)
+
+        self.graph_widget = pg.PlotWidget()
+        self.setCentralWidget(self.graph_widget)
+
+        self.graph_widget.setBackground('w')
+        self.graph_widget.setLabel('left', 'Ping Time (ms)', color='black', size=30)
+        self.graph_widget.setLabel('bottom', 'Time', color='black', size=30)
+        self.graph_widget.showGrid(x=True, y=True)
+        
+        self.ping_times = deque(maxlen=100)
+        self.time_stamps = deque(maxlen=100)
+
+        pen = pg.mkPen(color=(255, 0, 0), width=2)
+        self.data_line = self.graph_widget.plot(list(self.time_stamps), list(self.ping_times), pen=pen)
+
+    def update_graph(self, ping_time):
+        self.ping_times.append(ping_time)
+        self.time_stamps.append(time.time())
+        self.data_line.setData(list(self.time_stamps), list(self.ping_times))
 
 class TracerouteDialog(QDialog):
     def __init__(self, ip_address, parent=None):
