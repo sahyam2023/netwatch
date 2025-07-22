@@ -788,7 +788,6 @@ class PingMonitorWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        # ... (Window setup, icon setup - same as before) ...
         self.setWindowTitle("PingWatch")
         self.setMinimumSize(850, 600) # Reduced minimum height
         self.resize(1200, 700) 
@@ -872,10 +871,18 @@ class PingMonitorWindow(QMainWindow):
 
         # --- Alert Manager ---
         self.alert_manager = AlertManager(self)
-        self.tray_icon = QSystemTrayIcon(QIcon(ICON_FILENAME), self)
+        self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self)
         self.tray_icon.show()
+
+        # Define the full path to the sound file
+        alert_sound_path = os.path.join(base_path, "alert.wav")
+
+        # Use the full, resolved path for the sound effect
         self.alert_sound = QSoundEffect()
-        self.alert_sound.setSource(QUrl.fromLocalFile("alert.wav"))
+        if os.path.exists(alert_sound_path):
+            self.alert_sound.setSource(QUrl.fromLocalFile(alert_sound_path))
+        else:
+            print(f"Warning: Alert sound file not found at '{alert_sound_path}'")
 
         # --- UI Initialization ---
         self._init_ui()

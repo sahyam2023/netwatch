@@ -2,14 +2,16 @@
 
 # Define icon filename here as well for consistency
 ICON_FILENAME = "app_icon.ico"
+# Define the sound file name
+SOUND_FILENAME = "alert.wav"
 
 a = Analysis(
     ['pinger.py'],
     pathex=[],
     binaries=[],
-    # --- ADD ICON TO DATAS ---
-    datas=[(ICON_FILENAME, '.')], # Bundle ICON_FILENAME into the root (.)
-    # --- END ---
+    # --- FIX: Add alert.wav to datas ---
+    datas=[(ICON_FILENAME, '.'), (SOUND_FILENAME, '.')], # Bundle both files
+    # --- END FIX ---
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -23,26 +25,22 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    # --- NO NEED TO ADD TO a.binaries or a.datas here again ---
     a.binaries,
     a.datas,
-    # --- END ---
     [],
-    name='PingWatch', # Use the name from your command
+    name='PingWatch',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # --- Use console=False and disable_windowed_traceback ---
-    console=False,                # Matches --noconsole
+    console=False,
     disable_windowed_traceback=False,
-    # --- END ---
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='app_icon.ico', # Set the EXE icon here
-    uac_admin=True,       # Request admin privileges
+    icon='app_icon.ico',
+    uac_admin=True,
 )
