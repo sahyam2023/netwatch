@@ -647,18 +647,18 @@ class PingMonitorWindow(QMainWindow):
 
         # Create Ping Monitor Page
         ping_monitor_page_widget = QWidget()
-        ping_monitor_layout = QVBoxLayout(ping_monitor_page_widget)
-        ping_monitor_layout.setContentsMargins(0, 0, 0, 0)  # No extra margins needed
-        ping_monitor_layout.setSpacing(10)
+        ping_monitor_layout = QHBoxLayout(ping_monitor_page_widget) # Use QHBoxLayout
+        ping_monitor_layout.setContentsMargins(0, 0, 0, 0)
+        ping_monitor_layout.setSpacing(0)
 
-        # --- Configuration Group ---
-        config_group = QGroupBox("Configuration")
-        config_group.setObjectName("config_group")
-        config_layout = QVBoxLayout(config_group)
-        config_layout.setSpacing(8)
+        # --- Main Horizontal Splitter ---
+        self.main_splitter = QSplitter(Qt.Horizontal)
 
-        # --- Top row for API and IP Range ---
-        top_row_layout = QHBoxLayout()
+        # --- Left Sidebar (Configuration Panel) ---
+        self.sidebar_widget = QWidget()
+        sidebar_layout = QVBoxLayout(self.sidebar_widget)
+        sidebar_layout.setContentsMargins(10, 10, 10, 10)
+        sidebar_layout.setSpacing(10)
 
         # API Fetch Controls
         api_fetch_group = QGroupBox("API Fetch")
@@ -677,7 +677,7 @@ class PingMonitorWindow(QMainWindow):
         self.fetch_api_button = QPushButton("Fetch IPs")
         self.fetch_api_button.setToolTip("Fetches camera IPs and appends to the list")
         api_fetch_layout.addWidget(self.fetch_api_button)
-        top_row_layout.addWidget(api_fetch_group)
+        sidebar_layout.addWidget(api_fetch_group)
 
         # IP Range Group
         range_group = QGroupBox("Add IP Range")
@@ -694,14 +694,9 @@ class PingMonitorWindow(QMainWindow):
         self.add_range_button = QPushButton("Add Range")
         self.add_range_button.setToolTip("Adds all IPs in the specified range to the list")
         range_layout.addWidget(self.add_range_button)
-        top_row_layout.addWidget(range_group)
-
-        top_row_layout.addStretch(1)
-
-        config_layout.addLayout(top_row_layout)
+        sidebar_layout.addWidget(range_group)
 
         # IP Input Area
-        ip_controls_layout = QVBoxLayout()
         ip_label_row_layout = QHBoxLayout()
         ip_label = QLabel("Target IPs/Hostnames:")
         ip_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -715,14 +710,13 @@ class PingMonitorWindow(QMainWindow):
         self.ip_count_label.setToolTip("Number of non-empty lines entered below.")
         self.ip_count_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         ip_label_row_layout.addWidget(self.ip_count_label)
-        ip_controls_layout.addLayout(ip_label_row_layout)
+        sidebar_layout.addLayout(ip_label_row_layout)
 
         self.ip_text_edit = QTextEdit()
         self.ip_text_edit.setPlaceholderText(f"Enter one target per line (Max: {MAX_IPS})...")
         self.ip_text_edit.setAcceptRichText(False)
-        self.ip_text_edit.setFixedHeight(80)
-        ip_controls_layout.addWidget(self.ip_text_edit)
-        config_layout.addLayout(ip_controls_layout)
+        self.ip_text_edit.setFixedHeight(100) # Give it a bit more space
+        sidebar_layout.addWidget(self.ip_text_edit)
 
         # Duration and Payload Settings
         settings_layout = QHBoxLayout()
@@ -740,11 +734,11 @@ class PingMonitorWindow(QMainWindow):
         self.payload_size_input.setAlignment(Qt.AlignCenter)
         settings_layout.addWidget(self.payload_size_input)
         settings_layout.addStretch(1)
-        config_layout.addLayout(settings_layout)
-        ping_monitor_layout.addWidget(config_group)
+        sidebar_layout.addLayout(settings_layout)
 
-        # --- Controls Group ---
-        control_layout = QHBoxLayout()
+        sidebar_layout.addStretch(1) # Pushes buttons to the bottom
+
+        # Primary Action Buttons
         self.start_button = QPushButton("Start Monitoring")
         self.start_button.setObjectName("startButton")
         self.stop_button = QPushButton("Stop Monitoring")
@@ -752,35 +746,17 @@ class PingMonitorWindow(QMainWindow):
         self.reset_button = QPushButton("Reset")
         self.reset_button.setObjectName("resetButton")
         self.reset_button.setEnabled(False)
-        self.save_button = QPushButton("Save All Logs")
-        self.save_button.setEnabled(False)
-        self.save_filtered_button = QPushButton("Save Timeout Logs")
-        self.save_filtered_button.setEnabled(False)
-        self.save_selected_button = QPushButton("Save Selected Logs")
-        self.save_selected_button.setEnabled(False)
-        self.scan_ports_button = QPushButton("Scan Ports")
-        self.scan_ports_button.setEnabled(False)
-        self.traceroute_button = QPushButton("Traceroute")
-        self.traceroute_button.setEnabled(False)
-        self.select_ips_button = QPushButton("Select IPs")
-        self.select_ips_button.setCheckable(True)
-        self.select_ips_button.setEnabled(False)
-        self.show_graph_button = QPushButton("Show Graph")
-        self.show_graph_button.setEnabled(False)
-        control_layout.addWidget(self.start_button)
-        control_layout.addWidget(self.stop_button)
-        control_layout.addWidget(self.save_button)
-        control_layout.addWidget(self.save_filtered_button)
-        control_layout.addWidget(self.save_selected_button)
-        control_layout.addWidget(self.scan_ports_button)
-        control_layout.addWidget(self.traceroute_button)
-        control_layout.addWidget(self.show_graph_button)
-        control_layout.addStretch(1)
-        control_layout.addWidget(self.select_ips_button)
-        control_layout.addWidget(self.reset_button)
-        ping_monitor_layout.addLayout(control_layout)
+        sidebar_layout.addWidget(self.start_button)
+        sidebar_layout.addWidget(self.stop_button)
+        sidebar_layout.addWidget(self.reset_button)
 
-        # --- Status & Progress ---
+        # --- Right Main Content (Results Panel) ---
+        self.main_content_widget = QWidget()
+        main_content_layout = QVBoxLayout(self.main_content_widget)
+        main_content_layout.setContentsMargins(10, 10, 10, 10)
+        main_content_layout.setSpacing(10)
+
+        # Status & Progress Bar
         status_layout = QHBoxLayout()
         self.status_label = AnimatedLabel("Status: Idle")
         self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -794,9 +770,37 @@ class PingMonitorWindow(QMainWindow):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%p%")
         status_layout.addWidget(self.progress_bar)
-        ping_monitor_layout.addLayout(status_layout)
+        main_content_layout.addLayout(status_layout)
 
-        # --- Results and Log Splitter ---
+        # Secondary Actions Button Bar
+        actions_bar_layout = QHBoxLayout()
+        self.save_button = QPushButton("Save All Logs")
+        self.save_button.setEnabled(False)
+        self.save_filtered_button = QPushButton("Save Timeout Logs")
+        self.save_filtered_button.setEnabled(False)
+        self.save_selected_button = QPushButton("Save Selected Logs")
+        self.save_selected_button.setEnabled(False)
+        self.scan_ports_button = QPushButton("Scan Ports")
+        self.scan_ports_button.setEnabled(False)
+        self.traceroute_button = QPushButton("Traceroute")
+        self.traceroute_button.setEnabled(False)
+        self.show_graph_button = QPushButton("Show Graph")
+        self.show_graph_button.setEnabled(False)
+        self.select_ips_button = QPushButton("Select IPs")
+        self.select_ips_button.setCheckable(True)
+        self.select_ips_button.setEnabled(False)
+        actions_bar_layout.addWidget(self.save_button)
+        actions_bar_layout.addWidget(self.save_filtered_button)
+        actions_bar_layout.addWidget(self.save_selected_button)
+        actions_bar_layout.addSpacing(15)
+        actions_bar_layout.addWidget(self.scan_ports_button)
+        actions_bar_layout.addWidget(self.traceroute_button)
+        actions_bar_layout.addWidget(self.show_graph_button)
+        actions_bar_layout.addStretch(1)
+        actions_bar_layout.addWidget(self.select_ips_button)
+        main_content_layout.addLayout(actions_bar_layout)
+
+        # Results and Log Splitter (The existing vertical one)
         results_group = QGroupBox("Monitoring Results")
         results_layout = QVBoxLayout(results_group)
         self.results_view = QTreeView()
@@ -821,11 +825,20 @@ class PingMonitorWindow(QMainWindow):
         self.log_text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         log_layout.addWidget(self.log_text_edit)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.addWidget(results_group)
-        splitter.addWidget(log_group)
-        splitter.setSizes([600, 60])
-        ping_monitor_layout.addWidget(splitter, 1)
+        self.results_splitter = QSplitter(Qt.Vertical)
+        self.results_splitter.addWidget(results_group)
+        self.results_splitter.addWidget(log_group)
+        self.results_splitter.setSizes([400, 200]) # Give more initial space to results
+        main_content_layout.addWidget(self.results_splitter, 1) # Ensure it stretches
+
+        # --- Assemble Main Splitter ---
+        self.main_splitter.addWidget(self.sidebar_widget)
+        self.main_splitter.addWidget(self.main_content_widget)
+        self.main_splitter.setStretchFactor(0, 0) # Sidebar doesn't stretch
+        self.main_splitter.setStretchFactor(1, 1) # Main content stretches
+        self.main_splitter.setSizes([300, 600]) # Initial size hint
+
+        ping_monitor_layout.addWidget(self.main_splitter)
 
         # Add Ping Monitor page to tab widget
         self.tab_widget.addTab(ping_monitor_page_widget, "Ping Monitor")
@@ -2243,8 +2256,22 @@ class LivePathAnalysisWindow(QDialog):
         self.table.setItem(row, 6, QTableWidgetItem(f"{data['jitter']:.1f}"))
 
     def closeEvent(self, event):
-        self.stop_analysis()
-        event.accept()
+        reply = QMessageBox.question(self, 'Window Close', 'Are you sure you want to close the window?',
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            self.stop_analysis()
+            event.accept()
+        else:
+            event.ignore()
+
+    def contextMenuEvent(self, event):
+        # In a QDialog, the question mark button emits a help request event.
+        # We can catch this and show our message box.
+        QMessageBox.information(self, "Traceroute Help",
+                                "This tool performs a traceroute to the selected IP address.\n\n"
+                                "It shows the path that packets take to reach the destination, "
+                                "displaying each hop along the way with its latency and packet loss.")
 
 class PathAnalysisWorker(QObject):
     hop_data_updated = Signal(dict)
