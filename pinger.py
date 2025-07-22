@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
-    QPropertyAnimation, QEasingCurve, QPoint, 
+    QPropertyAnimation, QEasingCurve, QPoint,
     pyqtProperty as Property # Use pyqtProperty
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIcon
@@ -464,7 +464,7 @@ class PingMonitorWindow(QMainWindow):
         icon_path = os.path.join(base_path, ICON_FILENAME)
         if os.path.exists(icon_path): self.setWindowIcon(QIcon(icon_path))
         else: print(f"Warning: Icon file not found at '{icon_path}'")
-        
+
         self.headers = ["IP Address", "Status", "Success", "Timeouts", "Unreach.", "Unknown", "Perm. Denied", "Other", "Total Pings"]
         # === CHANGE: Instantiate the custom model ===
         self.ping_model = PingDataModel(self.headers)
@@ -522,24 +522,33 @@ class PingMonitorWindow(QMainWindow):
 
         # --- Configuration Group ---
         config_group = QGroupBox("Configuration")
-        config_layout = QVBoxLayout(config_group); config_layout.setSpacing(8)
+        config_group.setObjectName("config_group")
+        config_layout = QVBoxLayout(config_group)
+        config_layout.setSpacing(8)
+
+        # --- Top row for API and IP Range ---
+        top_row_layout = QHBoxLayout()
+
         # API Fetch Controls
-        api_fetch_layout = QHBoxLayout()
-        api_fetch_layout.addWidget(QLabel("API Server IP:"))
-        self.api_ip_input = QLineEdit(); self.api_ip_input.setPlaceholderText("e.g., 192.168.3.40"); self.api_ip_input.setFixedWidth(120)
+        api_fetch_group = QGroupBox("API Fetch")
+        api_fetch_layout = QHBoxLayout(api_fetch_group)
+        api_fetch_layout.setSpacing(8)
+        api_fetch_layout.addWidget(QLabel("Server IP:"))
+        self.api_ip_input = QLineEdit()
+        self.api_ip_input.setPlaceholderText("e.g., 192.168.3.40")
+        self.api_ip_input.setFixedWidth(120)
         api_fetch_layout.addWidget(self.api_ip_input)
-        api_fetch_layout.addSpacing(10)
         api_fetch_layout.addWidget(QLabel("Port:"))
-        self.api_port_input = QLineEdit("8800"); self.api_port_input.setPlaceholderText("e.g., 8800"); self.api_port_input.setFixedWidth(60)
+        self.api_port_input = QLineEdit("8800")
+        self.api_port_input.setPlaceholderText("e.g., 8800")
+        self.api_port_input.setFixedWidth(60)
         api_fetch_layout.addWidget(self.api_port_input)
-        api_fetch_layout.addSpacing(15)
-        self.fetch_api_button = QPushButton("Fetch IPs from API"); self.fetch_api_button.setToolTip("Fetches camera IPs (Appends to the list below)")
+        self.fetch_api_button = QPushButton("Fetch IPs")
+        self.fetch_api_button.setToolTip("Fetches camera IPs and appends to the list")
         api_fetch_layout.addWidget(self.fetch_api_button)
-        api_fetch_layout.addStretch(1)
-        config_layout.addLayout(api_fetch_layout)
-        config_layout.addSpacing(10)
-        
-        # --- IP Range Group ---
+        top_row_layout.addWidget(api_fetch_group)
+
+        # IP Range Group
         range_group = QGroupBox("Add IP Range")
         range_layout = QHBoxLayout(range_group)
         range_layout.setSpacing(8)
@@ -547,18 +556,18 @@ class PingMonitorWindow(QMainWindow):
         self.start_ip_input = QLineEdit()
         self.start_ip_input.setPlaceholderText("e.g., 192.168.1.1")
         range_layout.addWidget(self.start_ip_input)
-        range_layout.addSpacing(10)
         range_layout.addWidget(QLabel("End IP:"))
         self.end_ip_input = QLineEdit()
         self.end_ip_input.setPlaceholderText("e.g., 192.168.1.254")
         range_layout.addWidget(self.end_ip_input)
-        range_layout.addSpacing(15)
         self.add_range_button = QPushButton("Add Range")
-        self.add_range_button.setToolTip("Adds all IPs in the specified range to the list below")
+        self.add_range_button.setToolTip("Adds all IPs in the specified range to the list")
         range_layout.addWidget(self.add_range_button)
-        range_layout.addStretch(1)
-        config_layout.addWidget(range_group)
-        
+        top_row_layout.addWidget(range_group)
+
+        top_row_layout.addStretch(1)
+        config_layout.addLayout(top_row_layout)
+
         # IP Input Area
         ip_controls_layout = QVBoxLayout() # Vertical layout for labels row + text edit
 
@@ -584,12 +593,12 @@ class PingMonitorWindow(QMainWindow):
         self.ip_text_edit = QTextEdit()
         self.ip_text_edit.setPlaceholderText(f"Enter one target per line (Max: {MAX_IPS})...") # Use MAX_IPS
         self.ip_text_edit.setAcceptRichText(False)
-        self.ip_text_edit.setFixedHeight(100) # Keep fixed height
+        self.ip_text_edit.setFixedHeight(80) # Keep fixed height
         ip_controls_layout.addWidget(self.ip_text_edit) # Add text edit below the labels row
 
         # Add the new vertical layout (containing labels row and text edit) to the config group
         config_layout.addLayout(ip_controls_layout)
-        
+
         # Duration and Payload Settings
         settings_layout = QHBoxLayout()
         settings_layout.addWidget(QLabel("Duration (min):"))
@@ -659,7 +668,7 @@ class PingMonitorWindow(QMainWindow):
         # Animation setup
         self.status_animation = QPropertyAnimation(self.status_label, b"backgroundColor", self)
         self.status_animation.setDuration(300); self.status_animation.setEasingCurve(QEasingCurve.InOutQuad)
-        
+
         self._update_ip_count_label()
 
     def _connect_signals(self):
@@ -670,7 +679,7 @@ class PingMonitorWindow(QMainWindow):
         self.fetch_api_button.clicked.connect(self.fetch_ips_from_api)
         self.add_range_button.clicked.connect(self.add_ip_range)
         self.ip_text_edit.textChanged.connect(self._update_ip_count_label)
-    
+
     @Slot()
     def _update_ip_count_label(self):
         """ Updates the label showing the count of lines in the IP input field. """
@@ -699,9 +708,10 @@ class PingMonitorWindow(QMainWindow):
             QLabel {{ background-color: transparent; padding: 2px; }}
             QLineEdit, QTextEdit {{ background-color: {colors["input_bg"]}; border: 1px solid {colors["border"]}; border-radius: 3px; padding: 5px; selection-background-color: {colors["accent"]}; selection-color: white; }}
             QTextEdit#logText {{ background-color: {colors["log_bg"]}; font-family: Consolas, Courier, monospace; }}
-            QPushButton {{ background-color: #E0E0E0; border: 1px solid #BDBDBD; padding: 8px 15px; border-radius: 4px; min-width: 80px; }}
+            QPushButton {{ background-color: #E0E0E0; border: 1px solid #BDBDBD; padding: 6px 10px; border-radius: 4px; min-width: 70px; font-size: 8pt; }}
             QPushButton:hover {{ background-color: #D0D0D0; border-color: #A0A0A0; }}
             QPushButton:pressed {{ background-color: #C0C0C0; }}
+            QGroupBox#config_group QPushButton {{ padding: 4px 8px; font-size: 8pt; }}
             QPushButton:disabled {{ background-color: #F0F0F0; color: #A0A0A0; border-color: #D0D0D0; }}
             QPushButton#startButton {{ background-color: {colors["success"]}; color: white; border: none; font-weight: bold; }}
             QPushButton#startButton:hover {{ background-color: #28B463; }}
@@ -798,7 +808,7 @@ class PingMonitorWindow(QMainWindow):
         self._log_event_gui(f"API Fetch Error: {error_message}", "critical") # Log direct to GUI
         self.update_status("API Fetch Failed", "error")
         QMessageBox.critical(self, "API Fetch Error", f"Failed to fetch IPs from the API:\n\n{error_message}")
-    
+
     @Slot()
     def add_ip_range(self):
         start_ip_str = self.start_ip_input.text().strip()
@@ -818,7 +828,7 @@ class PingMonitorWindow(QMainWindow):
 
             current_text = self.ip_text_edit.toPlainText().strip()
             existing_ips = set(line.strip() for line in current_text.splitlines() if line.strip())
-            
+
             ips_to_add = []
             current_ip = start_ip
             while current_ip <= end_ip:
@@ -826,7 +836,7 @@ class PingMonitorWindow(QMainWindow):
                 if ip_str not in existing_ips:
                     ips_to_add.append(ip_str)
                 current_ip += 1
-            
+
             if not ips_to_add:
                 QMessageBox.information(self, "No New IPs", "All IPs in the specified range are already in the list.")
                 return
@@ -841,7 +851,7 @@ class PingMonitorWindow(QMainWindow):
                 self.ip_text_edit.append(ips_string_to_append)
             else:
                 self.ip_text_edit.setPlainText(ips_string_to_append)
-            
+
             self.start_ip_input.clear()
             self.end_ip_input.clear()
             QMessageBox.information(self, "Success", f"Added {len(ips_to_add)} new IPs to the list.")
@@ -969,9 +979,14 @@ class PingMonitorWindow(QMainWindow):
 
         # --- Setup UI for Running ---
         self.monitoring_active = True
-        self.start_button.setEnabled(False); self.stop_button.setEnabled(True); self.save_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.start_button.setStyleSheet("background-color: #A0A0A0; color: white; border: none; font-weight: bold;")
+        self.stop_button.setEnabled(True)
+        self.stop_button.setStyleSheet("background-color: #E74C3C; color: white; border: none; font-weight: bold;")
+        self.save_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
         self.api_ip_input.setEnabled(False); self.api_port_input.setEnabled(False); self.fetch_api_button.setEnabled(False)
+        self.add_range_button.setEnabled(False)
         self._log_event_gui(f"Monitoring started: {len(self.ips_to_monitor)} targets, {self.duration_min} min, Payload: {self.current_payload_size} B", "info") # Direct log
 
         # --- Timing and Tree Items ---
@@ -1172,13 +1187,13 @@ class PingMonitorWindow(QMainWindow):
         elif self.stopping_initiated:
              # Update status while stopping
              self.update_status(f"Stopping... ({self.active_workers_count} workers remaining)", "stopping")
-             
+
     def _finalize_monitoring(self):
         """ Resets the UI and state after monitoring stops completely. """
         # Double-check to prevent multiple finalizations
         if not self.monitoring_active and not self.stopping_initiated:
             #  print("Finalize called but not active/stopping. Skipping.") # Debug
-             return         
+             return
         # Ensure the GUI processes any last updates
         self._process_queued_updates()
         self.gui_update_timer.stop() # Stop the GUI update timer now
@@ -1187,9 +1202,14 @@ class PingMonitorWindow(QMainWindow):
         self.stop_event.clear()
         self.duration_timer.stop() # Ensure duration timer is stopped
         # Re-enable UI elements
-        self.start_button.setEnabled(True); self.stop_button.setEnabled(False); self.save_button.setEnabled(True)
+        self.start_button.setEnabled(True)
+        self.start_button.setStyleSheet("") # Reset stylesheet
+        self.stop_button.setEnabled(False)
+        self.stop_button.setStyleSheet("") # Reset stylesheet
+        self.save_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
+        self.add_range_button.setEnabled(True)
 
         # Determine final status message
         finish_time = time.time() # Use current time for check
@@ -1220,7 +1240,7 @@ class PingMonitorWindow(QMainWindow):
         # Clean up any remaining worker/thread references (should be empty now)
         self.worker_threads.clear()
         self.active_workers_count = 0
-    
+
     @Slot()
     def save_log(self):
         """
