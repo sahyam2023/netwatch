@@ -538,6 +538,27 @@ class PingMonitorWindow(QMainWindow):
         api_fetch_layout.addStretch(1)
         config_layout.addLayout(api_fetch_layout)
         config_layout.addSpacing(10)
+        
+        # --- IP Range Group ---
+        range_group = QGroupBox("Add IP Range")
+        range_layout = QHBoxLayout(range_group)
+        range_layout.setSpacing(8)
+        range_layout.addWidget(QLabel("Start IP:"))
+        self.start_ip_input = QLineEdit()
+        self.start_ip_input.setPlaceholderText("e.g., 192.168.1.1")
+        range_layout.addWidget(self.start_ip_input)
+        range_layout.addSpacing(10)
+        range_layout.addWidget(QLabel("End IP:"))
+        self.end_ip_input = QLineEdit()
+        self.end_ip_input.setPlaceholderText("e.g., 192.168.1.254")
+        range_layout.addWidget(self.end_ip_input)
+        range_layout.addSpacing(15)
+        self.add_range_button = QPushButton("Add Range")
+        self.add_range_button.setToolTip("Adds all IPs in the specified range to the list below")
+        range_layout.addWidget(self.add_range_button)
+        range_layout.addStretch(1)
+        config_layout.addWidget(range_group)
+        
         # IP Input Area
         ip_controls_layout = QVBoxLayout() # Vertical layout for labels row + text edit
 
@@ -568,6 +589,7 @@ class PingMonitorWindow(QMainWindow):
 
         # Add the new vertical layout (containing labels row and text edit) to the config group
         config_layout.addLayout(ip_controls_layout)
+        
         # Duration and Payload Settings
         settings_layout = QHBoxLayout()
         settings_layout.addWidget(QLabel("Duration (min):"))
@@ -646,6 +668,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_button.clicked.connect(self.save_log)
         self.request_stop_signal.connect(self._initiate_stop) # For potential future use
         self.fetch_api_button.clicked.connect(self.fetch_ips_from_api)
+        self.add_range_button.clicked.connect(self.add_ip_range)
         self.ip_text_edit.textChanged.connect(self._update_ip_count_label)
     
     @Slot()
@@ -775,6 +798,56 @@ class PingMonitorWindow(QMainWindow):
         self._log_event_gui(f"API Fetch Error: {error_message}", "critical") # Log direct to GUI
         self.update_status("API Fetch Failed", "error")
         QMessageBox.critical(self, "API Fetch Error", f"Failed to fetch IPs from the API:\n\n{error_message}")
+    
+    @Slot()
+    def add_ip_range(self):
+        start_ip_str = self.start_ip_input.text().strip()
+        end_ip_str = self.end_ip_input.text().strip()
+
+        try:
+            start_ip = ipaddress.ip_address(start_ip_str)
+            end_ip = ipaddress.ip_address(end_ip_str)
+
+            if start_ip.version != end_ip.version:
+                QMessageBox.warning(self, "Input Error", "Start and End IPs must be of the same version (IPv4 or IPv6).")
+                return
+
+            if start_ip > end_ip:
+                QMessageBox.warning(self, "Input Error", "Start IP address must be less than or equal to the End IP address.")
+                return
+
+            current_text = self.ip_text_edit.toPlainText().strip()
+            existing_ips = set(line.strip() for line in current_text.splitlines() if line.strip())
+            
+            ips_to_add = []
+            current_ip = start_ip
+            while current_ip <= end_ip:
+                ip_str = str(current_ip)
+                if ip_str not in existing_ips:
+                    ips_to_add.append(ip_str)
+                current_ip += 1
+            
+            if not ips_to_add:
+                QMessageBox.information(self, "No New IPs", "All IPs in the specified range are already in the list.")
+                return
+
+            # Check if adding the new IPs would exceed the MAX_IPS limit
+            if len(existing_ips) + len(ips_to_add) > MAX_IPS:
+                QMessageBox.warning(self, "Limit Exceeded", f"Adding this range would exceed the maximum of {MAX_IPS} IPs. Please shorten the range or clear some existing IPs.")
+                return
+
+            ips_string_to_append = "\n".join(ips_to_add)
+            if current_text:
+                self.ip_text_edit.append(ips_string_to_append)
+            else:
+                self.ip_text_edit.setPlainText(ips_string_to_append)
+            
+            self.start_ip_input.clear()
+            self.end_ip_input.clear()
+            QMessageBox.information(self, "Success", f"Added {len(ips_to_add)} new IPs to the list.")
+
+        except ValueError as e:
+             QMessageBox.warning(self, "Invalid IP Address", f"One of the IP addresses is invalid: {e}")
 
     # --- Status and Logging ---
     @Slot(str, str)
