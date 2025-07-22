@@ -1244,6 +1244,8 @@ class PingMonitorWindow(QMainWindow):
     def toggle_capture(self):
         if self.capture_thread and self.capture_thread.isRunning():
             self.capture_worker.stop()
+            self.capture_thread.quit()
+            self.capture_thread.wait(5000)  # Wait for 5 seconds
             self.capture_start_stop_button.setText("Start Capture")
             self.capture_save_button.setEnabled(True)
         else:
@@ -2626,6 +2628,7 @@ class NmapScanWorker(QObject):
 
     def stop(self):
         self._is_running = False
+        time.sleep(0.1)
 
     @Slot()
     def run(self):
