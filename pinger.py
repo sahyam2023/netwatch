@@ -24,7 +24,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIcon
 from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer
 # --- Configuration ---
-MAX_IPS = 1000 # Increased limit
+MAX_IPS = 1500 # Increased limit
 PING_TIMEOUT_SEC = 2
 PING_INTERVAL_SEC = 1
 ICON_FILENAME = "app_icon.ico"
@@ -1009,7 +1009,7 @@ class PingMonitorWindow(QMainWindow):
         # A better long-term solution might involve a custom selection model,
         # but this is a targeted fix for the reported bug.
         selection_model = self.results_view.selectionModel()
-
+        
         # This is a simplified way to ensure the clicked row remains 'selected'
         # visually without clearing other selections. It leverages the check state
         # as the source of truth, rather than the view's visual selection.
