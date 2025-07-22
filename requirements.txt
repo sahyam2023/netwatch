@@ -6,3 +6,4 @@ sympy
 requests
 python-nmap
 dnspython
+scapy

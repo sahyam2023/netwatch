@@ -31,6 +31,9 @@ from sympy import true
 import numpy as np
 import nmap
 import dns.resolver
+import scapy.all as scapy
+import scapy.utils
+import psutil
 
 # --- Configuration ---
 MAX_IPS = 1000 # Increased limit
@@ -622,6 +625,9 @@ class PingMonitorWindow(QMainWindow):
         self.single_scan_thread = None
         self.single_scan_worker = None
         self.stop_event = threading.Event()
+        self.capture_thread = None
+        self.capture_worker = None
+        self.captured_packets = []
 
         # --- NEW: Data Structures for Batching ---
         self.ping_results_data = {} # Still store final summary data {ip: data_dict}
@@ -975,6 +981,47 @@ class PingMonitorWindow(QMainWindow):
 
         self.tab_widget.addTab(dns_diag_page_widget, "DNS Diagnostics")
 
+        # Create Capture Page
+        capture_page_widget = QWidget()
+        capture_layout = QVBoxLayout(capture_page_widget)
+        capture_layout.setContentsMargins(10, 10, 10, 10)
+        capture_layout.setSpacing(10)
+
+        # Capture Controls
+        capture_controls_group = QGroupBox("Capture Controls")
+        capture_controls_layout = QHBoxLayout(capture_controls_group)
+        
+        capture_controls_layout.addWidget(QLabel("Interface:"))
+        self.capture_interface_combo = QComboBox()
+        self.capture_interface_combo.addItems(psutil.net_if_addrs().keys())
+        capture_controls_layout.addWidget(self.capture_interface_combo)
+
+        capture_controls_layout.addWidget(QLabel("Filter (BPF):"))
+        self.capture_filter_input = QLineEdit()
+        self.capture_filter_input.setPlaceholderText("e.g., host 8.8.8.8 or port 443")
+        capture_controls_layout.addWidget(self.capture_filter_input)
+
+        self.capture_start_stop_button = QPushButton("Start Capture")
+        capture_controls_layout.addWidget(self.capture_start_stop_button)
+
+        self.capture_save_button = QPushButton("Save to .pcap")
+        self.capture_save_button.setEnabled(False)
+        capture_controls_layout.addWidget(self.capture_save_button)
+        
+        capture_layout.addWidget(capture_controls_group)
+
+        # Capture Results
+        capture_results_group = QGroupBox("Captured Packets")
+        capture_results_layout = QVBoxLayout(capture_results_group)
+        self.capture_table = QTableWidget()
+        self.capture_table.setColumnCount(5)
+        self.capture_table.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
+        self.capture_table.horizontalHeader().setStretchLastSection(True)
+        capture_results_layout.addWidget(self.capture_table)
+        capture_layout.addWidget(capture_results_group)
+
+        self.tab_widget.addTab(capture_page_widget, "Capture")
+
         # Add the tab widget to the main layout
         main_layout.addWidget(self.tab_widget)
 
@@ -1011,6 +1058,80 @@ class PingMonitorWindow(QMainWindow):
         self.start_scan_button.clicked.connect(self.handle_scan_request)
         self.stop_scan_button.clicked.connect(self.stop_scan)
         self.start_dns_query_button.clicked.connect(self.start_dns_query)
+        self.capture_start_stop_button.clicked.connect(self.toggle_capture)
+        self.capture_save_button.clicked.connect(self.save_capture)
+
+    def toggle_capture(self):
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_worker.stop()
+            self.capture_start_stop_button.setText("Start Capture")
+            self.capture_save_button.setEnabled(True)
+        else:
+            self.capture_table.setRowCount(0)
+            self.captured_packets.clear()
+            
+            interface = self.capture_interface_combo.currentText()
+            bpf_filter = self.capture_filter_input.text().strip()
+
+            self.capture_thread = QThread()
+            self.capture_worker = PacketCaptureWorker(interface, bpf_filter)
+            self.capture_worker.moveToThread(self.capture_thread)
+
+            self.capture_worker.packet_captured.connect(self.update_capture_table)
+            self.capture_worker.finished.connect(self.capture_thread.quit)
+            self.capture_worker.finished.connect(self.capture_worker.deleteLater)
+            self.capture_thread.finished.connect(self.capture_thread.deleteLater)
+
+            self.capture_thread.started.connect(self.capture_worker.run)
+            self.capture_thread.start()
+
+            self.capture_start_stop_button.setText("Stop Capture")
+            self.capture_save_button.setEnabled(False)
+
+    def update_capture_table(self, packet):
+        self.captured_packets.append(packet)
+        row_position = self.capture_table.rowCount()
+        self.capture_table.insertRow(row_position)
+
+        self.capture_table.setItem(row_position, 0, QTableWidgetItem(datetime.datetime.fromtimestamp(packet.time).strftime('%Y-%m-%d %H:%M:%S')))
+        
+        src = packet[scapy.all.IP].src if packet.haslayer(scapy.all.IP) else "N/A"
+        dst = packet[scapy.all.IP].dst if packet.haslayer(scapy.all.IP) else "N/A"
+        
+        proto = "N/A"
+        if packet.haslayer(scapy.all.TCP):
+            proto = "TCP"
+        elif packet.haslayer(scapy.all.UDP):
+            proto = "UDP"
+        elif packet.haslayer(scapy.all.ICMP):
+            proto = "ICMP"
+        
+        length = len(packet)
+
+        self.capture_table.setItem(row_position, 1, QTableWidgetItem(src))
+        self.capture_table.setItem(row_position, 2, QTableWidgetItem(dst))
+        self.capture_table.setItem(row_position, 3, QTableWidgetItem(proto))
+        self.capture_table.setItem(row_position, 4, QTableWidgetItem(str(length)))
+
+    def save_capture(self):
+        if not self.captured_packets:
+            QMessageBox.information(self, "No Data", "No packets to save.")
+            return
+
+        default_filename = f"capture_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pcap"
+        options = QFileDialog.Options()
+        log_filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Packet Capture", default_filename,
+            "Pcap Files (*.pcap);;All Files (*)", options=options
+        )
+
+        if log_filename:
+            try:
+                scapy.utils.wrpcap(log_filename, self.captured_packets)
+                QMessageBox.information(self, "Save Successful", f"Capture saved to {log_filename}")
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", f"Could not save capture: {e}")
+
 
     def start_dns_query(self):
         hostname = self.dns_hostname_input.text().strip()
@@ -2473,6 +2594,29 @@ class SinglePortScanWorker(QObject):
                 sock.close()
             # DEBUG LOG: Announce that the worker is finished and will emit the signal
             self.finished.emit()
+
+class PacketCaptureWorker(QObject):
+    packet_captured = Signal(object)
+    finished = Signal()
+
+    def __init__(self, interface, bpf_filter):
+        super().__init__()
+        self.interface = interface
+        self.bpf_filter = bpf_filter
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def _process_packet(self, packet):
+        if not self._is_running:
+            return
+        self.packet_captured.emit(packet)
+
+    @Slot()
+    def run(self):
+        scapy.all.sniff(iface=self.interface, filter=self.bpf_filter, prn=self._process_packet, stop_filter=lambda p: not self._is_running)
+        self.finished.emit()
 
 # --- Main Execution ---
 if __name__ == "__main__":
