@@ -38,9 +38,11 @@ from scapy.layers.dns import DNS
 from scapy.layers.tls.all import TLS
 import scapy.utils
 from PyQt5.QtWidgets import QWhatsThis
+import traceback
+from mac_vendor_lookup import MacLookup
 
 # --- Configuration ---
-MAX_IPS = 1000 # Increased limit
+MAX_IPS = 1500 # Increased limit
 PING_TIMEOUT_SEC = 2
 PING_INTERVAL_SEC = 1
 ICON_FILENAME = "app_icon.ico"
@@ -1144,6 +1146,51 @@ class PingMonitorWindow(QMainWindow):
 
         self.tab_widget.addTab(capture_page_widget, "Capture")
 
+        # Create IP Scanner Page
+        ip_scanner_page_widget = QWidget()
+        ip_scanner_layout = QVBoxLayout(ip_scanner_page_widget)
+        ip_scanner_layout.setContentsMargins(10, 10, 10, 10)
+        ip_scanner_layout.setSpacing(10)
+
+        # IP Scanner Inputs
+        ip_scanner_inputs_group = QGroupBox("Scan Configuration")
+        ip_scanner_inputs_layout = QHBoxLayout(ip_scanner_inputs_group)
+        ip_scanner_inputs_layout.addWidget(QLabel("Target Range:"))
+        self.ip_scan_range_input = QLineEdit()
+        self.ip_scan_range_input.setPlaceholderText("e.g., 192.168.1.0/24 or 192.168.1.1-254")
+        ip_scanner_inputs_layout.addWidget(self.ip_scan_range_input)
+        
+        ip_scanner_inputs_layout.addWidget(QLabel("Scan Speed:"))
+        self.ip_scan_speed_combo = QComboBox()
+        self.ip_scan_speed_combo.addItems(["Fast", "Normal", "Slow"])
+        ip_scanner_inputs_layout.addWidget(self.ip_scan_speed_combo)
+
+        self.ip_scan_start_button = QPushButton("Start Scan")
+        self.ip_scan_stop_button = QPushButton("Stop Scan")
+        self.ip_scan_stop_button.setEnabled(False)
+        ip_scanner_inputs_layout.addWidget(self.ip_scan_start_button)
+        ip_scanner_inputs_layout.addWidget(self.ip_scan_stop_button)
+        ip_scanner_layout.addWidget(ip_scanner_inputs_group)
+
+        # IP Scanner Status Bar
+        self.ip_scan_progress_bar = QProgressBar()
+        self.ip_scan_progress_bar.setRange(0, 100)
+        self.ip_scan_progress_bar.setValue(0)
+        self.ip_scan_progress_bar.setVisible(False)
+        ip_scanner_layout.addWidget(self.ip_scan_progress_bar)
+
+        # IP Scanner Results
+        ip_scanner_results_group = QGroupBox("Discovered Devices")
+        ip_scanner_results_layout = QVBoxLayout(ip_scanner_results_group)
+        self.ip_scan_results_table = QTableWidget()
+        self.ip_scan_results_table.setColumnCount(5)
+        self.ip_scan_results_table.setHorizontalHeaderLabels(["IP Address", "Hostname", "MAC Address", "Vendor", "Status"])
+        self.ip_scan_results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        ip_scanner_results_layout.addWidget(self.ip_scan_results_table)
+        ip_scanner_layout.addWidget(ip_scanner_results_group, 1)
+
+        self.tab_widget.addTab(ip_scanner_page_widget, "IP Scanner")
+
         # Add the tab widget to the main layout
         main_layout.addWidget(self.tab_widget)
 
@@ -1184,6 +1231,8 @@ class PingMonitorWindow(QMainWindow):
         self.capture_save_button.clicked.connect(self.save_capture)
         self.capture_table.selectionModel().selectionChanged.connect(self._on_packet_selected)
         self.capture_filter_input_live.textChanged.connect(self.filter_capture_table)
+        self.ip_scan_start_button.clicked.connect(self.start_ip_scan)
+        self.ip_scan_stop_button.clicked.connect(self.stop_ip_scan)
 
     def get_brush_for_packet(self, packet):
         if packet.haslayer(scapy.all.TCP):
@@ -2658,6 +2707,70 @@ class PingMonitorWindow(QMainWindow):
             self._log_event_gui("Exiting application.", "info") # Direct log
             event.accept() # OK to close
 
+    def start_ip_scan(self):
+        target_range = self.ip_scan_range_input.text().strip()
+        if not target_range:
+            QMessageBox.warning(self, "Input Error", "Please enter a target range.")
+            return
+
+        self.ip_scan_start_button.setEnabled(False)
+        self.ip_scan_stop_button.setEnabled(True)
+        self.ip_scan_results_table.setRowCount(0)
+        self.ip_scan_progress_bar.setVisible(True)
+        self.ip_scan_progress_bar.setValue(0)
+
+        scan_speed = self.ip_scan_speed_combo.currentText()
+        timeout = 1
+        if scan_speed == "Fast":
+            timeout = 0.5
+        elif scan_speed == "Slow":
+            timeout = 2
+
+        self.ip_scan_thread = QThread()
+        self.ip_scan_worker = IpScanWorker(target_range, timeout)
+        self.ip_scan_worker.moveToThread(self.ip_scan_thread)
+
+        self.ip_scan_worker.host_found.connect(self.add_host_to_table)
+        self.ip_scan_worker.finished.connect(self._ip_scan_finished)
+        self.ip_scan_worker.progress_updated.connect(self.ip_scan_progress_bar.setValue)
+
+        self.ip_scan_thread.started.connect(self.ip_scan_worker.run)
+        self.ip_scan_thread.start()
+
+    def stop_ip_scan(self):
+        if hasattr(self, 'ip_scan_worker') and self.ip_scan_worker:
+            self.ip_scan_worker.stop()
+        self.ip_scan_stop_button.setEnabled(False)
+
+    def add_host_to_table(self, host_data):
+        row_position = self.ip_scan_results_table.rowCount()
+        self.ip_scan_results_table.insertRow(row_position)
+        self.ip_scan_results_table.setItem(row_position, 0, QTableWidgetItem(host_data["ip"]))
+        self.ip_scan_results_table.setItem(row_position, 1, QTableWidgetItem(host_data["hostname"]))
+        self.ip_scan_results_table.setItem(row_position, 2, QTableWidgetItem(host_data["mac"]))
+        self.ip_scan_results_table.setItem(row_position, 3, QTableWidgetItem(host_data["vendor"]))
+        
+        status_item = QTableWidgetItem(host_data["status"])
+        if host_data["status"] == "Up":
+            status_item.setBackground(QColor("#2ECC71"))
+        else:
+            status_item.setBackground(QColor("#E74C3C"))
+        self.ip_scan_results_table.setItem(row_position, 4, status_item)
+
+    def _ip_scan_finished(self):
+        self.ip_scan_start_button.setEnabled(True)
+        self.ip_scan_stop_button.setEnabled(False)
+        self.ip_scan_progress_bar.setVisible(False)
+        if self.ip_scan_thread:
+            self.ip_scan_thread.quit()
+            self.ip_scan_thread.wait()
+
+
+    def update_ip_scan_progress(self, current, total):
+        if total > 0:
+            progress = int((current / total) * 100)
+            self.progress_bar.setValue(progress)
+
 class GraphWindow(QMainWindow):
     def __init__(self, ip_address, parent=None):
         super().__init__(parent)
@@ -3021,7 +3134,109 @@ class SinglePortScanWorker(QObject):
             self.finished.emit()
 
 
-import traceback
+
+
+class IpScanWorker(QObject):
+    host_found = Signal(dict) # Emits a dictionary for each live host
+    finished = Signal()
+    progress_updated = Signal(int, int) # (current_ip, total_ips)
+
+    def __init__(self, target_range, timeout=1):
+        super().__init__()
+        self.target_range = target_range
+        self.timeout = timeout
+        self._is_running = True
+        # Initialize MacLookup. This can be done once.
+        # It may download the vendor list on first run.
+        try:
+            self.mac_lookup = MacLookup()
+            # self.mac_lookup.update_vendors() # Uncomment to force update
+        except Exception as e:
+            print(f"Could not initialize MacLookup: {e}")
+            self.mac_lookup = None
+
+    def stop(self):
+        self._is_running = False
+
+    def _parse_range(self, target_range):
+        """Parses a target range string into a list of IP addresses."""
+        try:
+            if '/' in target_range:
+                return [str(ip) for ip in ipaddress.ip_network(target_range, strict=False)]
+            elif '-' in target_range:
+                start_ip, end_ip = target_range.split('-')
+                start = ipaddress.ip_address(start_ip.strip())
+                end = ipaddress.ip_address(end_ip.strip())
+                return [str(ipaddress.ip_address(i)) for i in range(int(start), int(end) + 1)]
+        except ValueError as e:
+            print(f"Error parsing IP range: {e}")
+            return []
+        return []
+
+
+    def _get_hostname(self, ip_address):
+        """Gets the hostname for a given IP address."""
+        try:
+            return socket.gethostbyaddr(ip_address)[0]
+        except (socket.herror, socket.gaierror):
+            return "N/A"
+
+    def _get_vendor(self, mac_address):
+        if self.mac_lookup:
+            try:
+                return self.mac_lookup.lookup(mac_address)
+            except Exception as e:
+                print(f"Could not look up vendor for {mac_address}: {e}")
+                return "Unknown"
+        return "Lookup Disabled"
+
+    @Slot()
+    def run(self):
+        # 1. Parse the target_range into a list of IP addresses
+        ip_list = self._parse_range(self.target_range)
+        total_ips = len(ip_list)
+
+        # 2. Loop through each IP
+        for i, ip in enumerate(ip_list):
+            if not self._is_running:
+                break
+            
+            self.progress_updated.emit(i + 1, total_ips)
+
+            # 3. Use Scapy's srp function to send ARP requests
+            try:
+                arp_request = scapy.all.ARP(pdst=ip)
+                broadcast = scapy.all.Ether(dst="ff:ff:ff:ff:ff:ff")
+                arp_request_broadcast = broadcast/arp_request
+                answered_list = scapy.all.srp(arp_request_broadcast, timeout=self.timeout, verbose=False)[0]
+
+                # 4. If a host replies (answered_list is not empty):
+                if answered_list:
+                    for sent, received in answered_list:
+                        # Extract IP, MAC address from the reply
+                        ip_address = received.psrc
+                        mac_address = received.hwsrc
+
+                        # Try to get the hostname
+                        hostname = self._get_hostname(ip_address)
+
+                        # Try to get the vendor from the MAC address
+                        vendor = self._get_vendor(mac_address)
+
+                        # 5. Emit the results for the GUI to display
+                        self.host_found.emit({
+                            "ip": ip_address,
+                            "hostname": hostname,
+                            "mac": mac_address,
+                            "vendor": vendor,
+                            "status": "Up"
+                        })
+            except Exception as e:
+                print(f"Error scanning IP {ip}: {e}")
+
+
+        self.finished.emit()
+
 
 class PacketCaptureWorker(QObject):
     packet_captured = Signal(object)
