@@ -15,25 +15,29 @@ import socket
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
-    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
+    QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
     QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
-    QPropertyAnimation, QEasingCurve, QPoint,
+    QPropertyAnimation, QEasingCurve,
     pyqtProperty as Property # Use pyqtProperty
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIcon
-from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFilterProxyModel
+from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFilterProxyModel, QEvent
 import pyqtgraph as pg
 from sympy import true
 import numpy as np
 import nmap
 import dns.resolver
 import scapy.all as scapy
+from scapy.layers.l2 import ARP
+from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.dns import DNS
+from scapy.layers.tls.all import TLS
 import scapy.utils
-import psutil
+from PyQt5.QtWidgets import QWhatsThis
 
 # --- Configuration ---
 MAX_IPS = 1000 # Increased limit
@@ -655,6 +659,15 @@ class PingMonitorWindow(QMainWindow):
         self.capture_thread = None
         self.capture_worker = None
         self.captured_packets = deque(maxlen=MAX_PACKETS)
+        # --- ADD THIS DICTIONARY FOR PROTOCOL COLORS ---
+        self.protocol_colors = {
+            "TCP": QColor("#EAF2F8"),    # Light Blue
+            "UDP": QColor("#E8F6F3"),    # Light Teal
+            "ICMP": QColor("#F4ECF7"),   # Light Purple
+            "ARP": QColor("#FEF9E7"),    # Light Yellow
+            "DNS": QColor("#FDEDEC"),    # Light Pink/Red
+            "HTTPS (TLS)": QColor("#D5F5E3"), # Light Green
+        }
         self.dns_cache = {}
         self.capture_interface_map = {}
         self.port_to_service = {
@@ -1034,41 +1047,31 @@ class PingMonitorWindow(QMainWindow):
         capture_layout = QVBoxLayout(capture_page_widget)
         capture_layout.setContentsMargins(10, 10, 10, 10)
         capture_layout.setSpacing(10)
-
-        # Capture Controls
+        
+        # Add the live filter bar
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filter:"))
+        self.capture_filter_input_live = QLineEdit() # This must exist
+        self.capture_filter_input_live.setPlaceholderText("e.g., tcp or 8.8.8.8")
+        filter_layout.addWidget(self.capture_filter_input_live)
+        capture_layout.addLayout(filter_layout)
+        
+      # Capture Controls
         capture_controls_group = QGroupBox("Capture Controls")
         capture_controls_layout = QHBoxLayout(capture_controls_group)
-        
+
         capture_controls_layout.addWidget(QLabel("Interface:"))
         self.capture_interface_combo = QComboBox()
-        # --- FIX: Populate with friendly names, map them to Scapy's internal names ---
+        # --- Populate the dropdown with friendly names ---
         try:
-            # This function returns a list of dictionaries with detailed info on Windows
-            interfaces = scapy.all.get_windows_if_list()
-            self.capture_interface_map.clear() # Clear any old data
-            
-            friendly_names_to_add = []
+            interfaces = scapy.interfaces.get_working_ifaces()
             for iface in interfaces:
-                # The 'name' key is the friendly one (e.g., "Wi-Fi"),
-                # the 'guid' key is what Scapy's sniff function needs.
-                friendly_name = iface.get('name', 'Unknown Interface')
-                internal_name = iface.get('guid')
-                
-                if internal_name:
-                    self.capture_interface_map[friendly_name] = internal_name
-                    friendly_names_to_add.append(friendly_name)
-
-            if friendly_names_to_add:
-                self.capture_interface_combo.addItems(friendly_names_to_add)
-            else:
-                 # Fallback if the detailed list fails for some reason
-                scapy_interfaces = scapy.all.get_if_list()
-                self.capture_interface_combo.addItems(scapy_interfaces)
-
+                self.capture_interface_combo.addItem(iface.name)
         except Exception as e:
-            print(f"Could not get Scapy interfaces: {e}")
-            self.capture_interface_combo.addItem("ERROR - No Interfaces Found")
-            self.capture_start_stop_button.setEnabled(False) # Disable if we can't find any
+            print(f"Error getting Scapy interfaces: {e}")
+            self.capture_interface_combo.addItem("Could not find interfaces")
+            self.capture_interface_combo.setEnabled(False)
+
         capture_controls_layout.addWidget(self.capture_interface_combo)
 
         capture_controls_layout.addWidget(QLabel("Filter (BPF):"))
@@ -1082,51 +1085,62 @@ class PingMonitorWindow(QMainWindow):
         self.capture_save_button = QPushButton("Save to .pcap")
         self.capture_save_button.setEnabled(False)
         capture_controls_layout.addWidget(self.capture_save_button)
-        
+
         capture_layout.addWidget(capture_controls_group)
 
-        # Add the filter bar
-        filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("Filter:"))
-        self.capture_filter_input_live = QLineEdit()
-        self.capture_filter_input_live.setPlaceholderText("e.g., tcp or 8.8.8.8")
-        filter_layout.addWidget(self.capture_filter_input_live)
-        capture_layout.addLayout(filter_layout)
-
-        # Capture Results
+        # Capture Results - RE-INTRODUCING THE QTreeView AND MODELS
+                # Capture Results - RE-INTRODUCING THE FULL THREE-PANE VIEW
         capture_results_group = QGroupBox("Captured Packets")
         capture_results_layout = QVBoxLayout(capture_results_group)
 
-        # Create the three-pane view
+        # Create the three-pane view using a vertical splitter
         capture_splitter = QSplitter(Qt.Vertical)
 
-        self.capture_table = QTreeView()
+        # --- Top Pane: The Packet List (QTreeView) ---
         self.capture_model = QStandardItemModel()
         self.capture_model.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
+        
+        # We need the proxy model again for the live filter
+        # (Even though the filter itself is not connected yet, the view uses the proxy)
+        class PacketCaptureProxyModel(QSortFilterProxyModel):
+            def filterAcceptsRow(self, source_row, source_parent):
+                if not self.filterRegExp().pattern():
+                    return True
+                for i in range(self.sourceModel().columnCount()):
+                    index = self.sourceModel().index(source_row, i, source_parent)
+                    if self.filterRegExp().indexIn(self.sourceModel().data(index)) != -1:
+                        return True
+                return False
+
         self.capture_proxy_model = PacketCaptureProxyModel()
         self.capture_proxy_model.setSourceModel(self.capture_model)
         self.capture_proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        
+        self.capture_table = QTreeView()
         self.capture_table.setModel(self.capture_proxy_model)
-
+        self.capture_table.setSortingEnabled(True)
+        self.capture_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.capture_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.capture_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.capture_table.selectionModel().selectionChanged.connect(self._on_packet_selected)
-        self.capture_table.setSortingEnabled(True)
-        self.capture_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.capture_table.customContextMenuRequested.connect(self.show_capture_context_menu)
+        # Add the top pane to the splitter
         capture_splitter.addWidget(self.capture_table)
-
+        
+        # --- Middle Pane: The Packet Dissection Tree ---
         self.packet_dissection_tree = QTreeView()
         self.packet_dissection_tree.setHeaderHidden(True)
+        # Add the middle pane to the splitter
         capture_splitter.addWidget(self.packet_dissection_tree)
 
+        # --- Bottom Pane: The Raw Bytes View ---
         self.raw_bytes_text = QTextEdit()
         self.raw_bytes_text.setReadOnly(True)
         self.raw_bytes_text.setFont(QFont("Courier", 10))
+        # Add the bottom pane to the splitter
         capture_splitter.addWidget(self.raw_bytes_text)
 
+        # Add the fully assembled splitter to the layout
         capture_results_layout.addWidget(capture_splitter)
-        capture_layout.addWidget(capture_results_group)
+        capture_layout.addWidget(capture_results_group, 1)
 
         self.tab_widget.addTab(capture_page_widget, "Capture")
 
@@ -1168,10 +1182,8 @@ class PingMonitorWindow(QMainWindow):
         self.start_dns_query_button.clicked.connect(self.start_dns_query)
         self.capture_start_stop_button.clicked.connect(self.toggle_capture)
         self.capture_save_button.clicked.connect(self.save_capture)
+        self.capture_table.selectionModel().selectionChanged.connect(self._on_packet_selected)
         self.capture_filter_input_live.textChanged.connect(self.filter_capture_table)
-
-    def filter_capture_table(self, text):
-        self.capture_proxy_model.setFilterRegExp(text)
 
     def get_brush_for_packet(self, packet):
         if packet.haslayer(scapy.all.TCP):
@@ -1270,52 +1282,77 @@ class PingMonitorWindow(QMainWindow):
         dialog.exec_()
 
     def toggle_capture(self):
+        # This check will now work correctly, because self.capture_thread is None
+        # after a previous capture has finished and been cleaned up.
         if self.capture_thread and self.capture_thread.isRunning():
+            print("Stopping packet capture...")
+            self.capture_start_stop_button.setEnabled(False) # Disable while stopping
             self.capture_worker.stop()
-            self.capture_thread.quit()
-            self.capture_thread.wait(5000)  # Wait for 5 seconds
-            self.capture_start_stop_button.setText("Start Capture")
-            self.capture_save_button.setEnabled(True)
         else:
+            print("Starting packet capture...")
+            # Clear previous data
             self.capture_model.clear()
             self.capture_model.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
             self.captured_packets.clear()
             
-            selected_friendly_name = self.capture_interface_combo.currentText()
-            # Use the map to get the real interface name for Scapy
-            interface = self.capture_interface_map.get(selected_friendly_name, selected_friendly_name)
+            interface_name = self.capture_interface_combo.currentText()
             bpf_filter = self.capture_filter_input.text().strip()
 
-            self.capture_thread = QThread(self)
-            self.capture_worker = PacketCaptureWorker(interface, bpf_filter)
+            # --- Check for "Could not find interfaces" before proceeding ---
+            if interface_name == "Could not find interfaces":
+                self.handle_capture_error("Cannot start capture: No valid interfaces were found.")
+                return
+
+            print(f"Using interface: '{interface_name}', Filter: '{bpf_filter}'")
+
+            # Disable controls while running
+            self.capture_start_stop_button.setText("Stop Capture")
+            self.capture_interface_combo.setEnabled(False)
+            self.capture_filter_input.setEnabled(False)
+
+            # Setup and start the thread
+            self.capture_thread = QThread()
+            self.capture_worker = PacketCaptureWorker(interface_name, bpf_filter)
             self.capture_worker.moveToThread(self.capture_thread)
 
             self.capture_worker.packet_captured.connect(self.update_capture_table)
             self.capture_worker.error.connect(self.handle_capture_error)
+            self.capture_thread.started.connect(self.capture_worker.run)
+
+            # Connect signals for thread finishing and cleanup
             self.capture_worker.finished.connect(self.capture_thread.quit)
             self.capture_worker.finished.connect(self.capture_worker.deleteLater)
             self.capture_thread.finished.connect(self.capture_thread.deleteLater)
-            self.capture_thread.finished.connect(self._on_capture_thread_finished) # <-- ADD THIS CONNECTION
+            self.capture_thread.finished.connect(self._on_capture_thread_finished)
 
-            self.capture_thread.started.connect(self.capture_worker.run)
             self.capture_thread.start()
-
-            self.capture_start_stop_button.setText("Stop Capture")
-            self.capture_save_button.setEnabled(False)
+    
+    def filter_capture_table(self, text):
+        """Filters the packet list based on the text input."""
+        self.capture_proxy_model.setFilterRegExp(text)
 
     def _on_packet_selected(self, selected, deselected):
         selected_indexes = selected.indexes()
         if not selected_indexes:
+            # Clear detail views if nothing is selected
+            self.packet_dissection_tree.setModel(QStandardItemModel())
+            self.raw_bytes_text.clear()
             return
 
+        # Get the original index from the proxy model
         proxy_index = selected_indexes[0]
         source_index = self.capture_proxy_model.mapToSource(proxy_index)
+        
+        # Get the packet object we stored earlier
         packet = self.capture_model.itemFromIndex(source_index).data(Qt.UserRole)
+        if not packet:
+            return
 
         # Update dissection tree
-        model = QStandardItemModel()
-        self.packet_dissection_tree.setModel(model)
-        self.populate_dissection_tree(model, packet)
+        dissection_model = QStandardItemModel()
+        self.packet_dissection_tree.setModel(dissection_model)
+        self.populate_dissection_tree(dissection_model, packet)
+        self.packet_dissection_tree.expandAll() # Expand to show details
 
         # Update raw bytes view
         self.raw_bytes_text.setText(self.format_raw_bytes(packet))
@@ -1324,21 +1361,36 @@ class PingMonitorWindow(QMainWindow):
     def _on_capture_thread_finished(self):
         """Resets thread-related attributes after the capture thread has been deleted."""
         print("Capture thread has finished and is being cleaned up.")
-        self.capture_thread = None
-        self.capture_worker = None
-        # Re-enable buttons if they were disabled during a stop sequence
         self.capture_start_stop_button.setText("Start Capture")
         self.capture_start_stop_button.setEnabled(True)
+        self.capture_interface_combo.setEnabled(True)
+        self.capture_filter_input.setEnabled(True)
+        # Only enable save if there are packets
+        self.capture_save_button.setEnabled(len(self.captured_packets) > 0)
+        
+        # Clean up Python variables to prevent the 'wrapped C/C++ object' error
+        self.capture_thread = None
+        self.capture_worker = None
 
     def populate_dissection_tree(self, model, packet):
         parent_item = model.invisibleRootItem()
-        if packet:
-            for layer in packet.layers():
-                layer_item = QStandardItem(layer.name)
-                parent_item.appendRow(layer_item)
-                for field_name, field_value in layer.fields.items():
-                    field_item = QStandardItem(f"{field_name}: {field_value}")
+        current_layer = packet
+        while current_layer:
+            layer_name = current_layer.name
+            layer_item = QStandardItem(layer_name)
+            parent_item.appendRow(layer_item)
+
+            for field_desc in current_layer.fields_desc:
+                field_name = field_desc.name
+                if hasattr(current_layer, field_name):
+                    field_value = getattr(current_layer, field_name)
+                    # Represent value nicely
+                    field_value_repr = repr(field_value)
+                    field_item = QStandardItem(f"{field_name}: {field_value_repr}")
                     layer_item.appendRow(field_item)
+            
+            # Move to the next layer in the packet
+            current_layer = current_layer.payload
 
     def format_raw_bytes(self, packet):
         if not packet:
@@ -1348,13 +1400,11 @@ class PingMonitorWindow(QMainWindow):
         ascii_lines = []
         for i in range(0, len(raw_bytes), 16):
             chunk = raw_bytes[i:i+16]
-            hex_lines.append(" ".join(f"{b:02x}" for b in chunk))
-            ascii_lines.append("".join(chr(b) if 32 <= b < 127 else "." for b in chunk))
-
-        formatted_lines = []
-        for i in range(len(hex_lines)):
-            formatted_lines.append(f"{hex_lines[i]:<48}  {ascii_lines[i]}")
-        return "\n".join(formatted_lines)
+            hex_part = " ".join(f"{b:02x}" for b in chunk)
+            ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            formatted_line = f"{i:08x}:  {hex_part:<48}  {ascii_part}"
+            hex_lines.append(formatted_line)
+        return "\n".join(hex_lines)
 
     def resolve_ip(self, ip_address):
         if ip_address not in self.dns_cache:
@@ -1382,44 +1432,58 @@ class PingMonitorWindow(QMainWindow):
     def update_capture_table(self, packet):
         self.captured_packets.append(packet)
         
-        time_item = QStandardItem(datetime.datetime.fromtimestamp(packet.time).strftime('%Y-%m-%d %H:%M:%S'))
+        # --- Create QStandardItems for the new row ---
+        time_str = datetime.datetime.fromtimestamp(packet.time).strftime('%Y-%m-%d %H:%M:%S.%f')
+        time_item = QStandardItem(time_str)
+        # Store the packet object so we can dissect it on selection
         time_item.setData(packet, Qt.UserRole)
         
-        src = packet[scapy.all.IP].src if packet.haslayer(scapy.all.IP) else "N/A"
-        dst = packet[scapy.all.IP].dst if packet.haslayer(scapy.all.IP) else "N/A"
-        
-        self.resolve_ip(src)
-        self.resolve_ip(dst)
+        src = "N/A"
+        dst = "N/A"
+        proto = "Other" # Default protocol
+        background_brush = QBrush(Qt.white) # Default background
 
-        src_display = self.dns_cache.get(src, src)
-        dst_display = self.dns_cache.get(dst, dst)
-
-        proto = "N/A"
-        if packet.haslayer(scapy.all.TCP):
-            sport = packet[scapy.all.TCP].sport
-            dport = packet[scapy.all.TCP].dport
-            proto = self.port_to_service.get(sport, self.port_to_service.get(dport, "TCP"))
-        elif packet.haslayer(scapy.all.UDP):
-            sport = packet[scapy.all.UDP].sport
-            dport = packet[scapy.all.UDP].dport
-            proto = self.port_to_service.get(sport, self.port_to_service.get(dport, "UDP"))
-        elif packet.haslayer(scapy.all.ICMP):
+        # --- Protocol Detection Logic ---
+        if packet.haslayer(DNS):
+            proto = "DNS"
+        elif packet.haslayer(TLS):
+            proto = "HTTPS (TLS)"
+        elif packet.haslayer(TCP):
+            proto = "TCP"
+        elif packet.haslayer(UDP):
+            proto = "UDP"
+        elif packet.haslayer(ICMP):
             proto = "ICMP"
-        
+        elif packet.haslayer(ARP):
+            proto = "ARP"
+
+        # Set source and destination based on layer
+        if packet.haslayer(IP):
+            src = packet.getlayer(IP).src
+            dst = packet.getlayer(IP).dst
+        elif packet.haslayer(ARP):
+            src = packet.getlayer(ARP).psrc
+            dst = packet.getlayer(ARP).pdst
+
         length = len(packet)
 
-        brush = self.get_brush_for_packet(packet)
-        row = [
-            time_item,
-            QStandardItem(src_display),
-            QStandardItem(dst_display),
-            QStandardItem(proto),
-            QStandardItem(str(length))
-        ]
-        for item in row:
-            item.setBackground(brush)
-        self.capture_model.appendRow(row)
+        # Get the color for the detected protocol
+        if proto in self.protocol_colors:
+            background_brush = QBrush(self.protocol_colors[proto])
 
+        # Create items for the rest of the row
+        src_item = QStandardItem(src)
+        dst_item = QStandardItem(dst)
+        proto_item = QStandardItem(proto)
+        length_item = QStandardItem(str(length))
+
+        # --- Apply the background color to all items in the row ---
+        for item in [time_item, src_item, dst_item, proto_item, length_item]:
+            item.setBackground(background_brush)
+
+        # Append the new row to the model
+        self.capture_model.appendRow([time_item, src_item, dst_item, proto_item, length_item])
+        
     def save_capture(self):
         if not self.captured_packets:
             QMessageBox.information(self, "No Data", "No packets to save.")
@@ -1475,9 +1539,23 @@ class PingMonitorWindow(QMainWindow):
         self.dns_results_text_edit.append(error_message)
 
     def handle_capture_error(self, error_message):
+        """
+        Shows a critical error message and resets the capture UI to a stopped state.
+        """
         QMessageBox.critical(self, "Capture Error", error_message)
+        
+        # --- Safely reset the UI after an error ---
         self.capture_start_stop_button.setText("Start Capture")
-        self.capture_save_button.setEnabled(False)
+        self.capture_start_stop_button.setEnabled(True)
+        self.capture_save_button.setEnabled(False) # No data to save
+        self.capture_interface_combo.setEnabled(True)
+        self.capture_filter_input.setEnabled(True)
+
+        # If the thread still exists, ensure it's told to stop and cleaned up.
+        # This prevents zombie threads if the error happens after a successful start.
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_worker.stop()
+            self.capture_thread.quit()
 
     def stop_scan(self):
         if hasattr(self, 'nmap_worker') and self.nmap_worker:
@@ -2728,19 +2806,23 @@ class BasicPortScanWorker(QObject):
                     else:
                         self.port_status.emit(port, "Closed")
         self.finished.emit()
-
-
 class LivePathAnalysisWindow(QDialog):
     def __init__(self, ip_address, parent=None):
         super().__init__(parent)
         self.ip_address = ip_address
         self.setWindowTitle(f"Live Path Analysis to {self.ip_address}")
         self.setMinimumSize(800, 600)
+        # This flag enables the '?' button
+        self.setWindowFlags(self.windowFlags() | Qt.WindowContextHelpButtonHint)
 
         self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["Hop #", "Hostname", "Packet Loss (%)", "Sent Packets", "Last RTT", "Average RTT", "Jitter (Std. Dev.)"])
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.layout.addWidget(self.table)
 
         self.button_layout = QHBoxLayout()
@@ -2756,31 +2838,51 @@ class LivePathAnalysisWindow(QDialog):
 
         self.worker = None
         self.thread = None
+        self._is_closing = False # State flag for handling the close event
 
     def start_analysis(self):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        
         self.thread = QThread(self)
         self.worker = PathAnalysisWorker(self.ip_address)
         self.worker.moveToThread(self.thread)
+
         self.worker.hop_data_updated.connect(self.update_table)
         self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self._on_thread_finished)
+
         self.thread.started.connect(self.worker.run)
         self.thread.start()
 
     def stop_analysis(self):
-        if self.worker:
+        """Tells the worker to stop. Does NOT close the window."""
+        if self.worker and self.thread and self.thread.isRunning():
+            self.stop_button.setEnabled(False)
+            self.stop_button.setText("Stopping...")
             self.worker.stop()
+
+    @Slot()
+    def _on_thread_finished(self):
+        """Handles UI reset and conditional closing after the thread has terminated."""
+        print("Traceroute thread finished.")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.stop_button.setText("Stop")
 
+        self.thread = None
+        self.worker = None
+
+        if self._is_closing:
+            self.accept()
+            
     def update_table(self, data):
         distance = data['distance']
         hostname = data['hostname']
-        
-        # Check if the hop is already in the table
         items = self.table.findItems(str(distance), Qt.MatchExactly)
         if items:
             row = items[0].row()
@@ -2789,31 +2891,41 @@ class LivePathAnalysisWindow(QDialog):
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(str(distance)))
             self.table.setItem(row, 1, QTableWidgetItem(hostname))
-
         self.table.setItem(row, 2, QTableWidgetItem(f"{data['packet_loss']:.1f}"))
         self.table.setItem(row, 3, QTableWidgetItem(str(data['sent'])))
         self.table.setItem(row, 4, QTableWidgetItem(f"{data['last_rtt']:.1f}"))
         self.table.setItem(row, 5, QTableWidgetItem(f"{data['avg_rtt']:.1f}"))
         self.table.setItem(row, 6, QTableWidgetItem(f"{data['jitter']:.1f}"))
+        self.table.resizeColumnsToContents()
+
+    # --- THIS IS THE CORRECT, WORKING HELP BUTTON FIX ---
+    def event(self, event):
+        if event.type() == QEvent.EnterWhatsThisMode:
+            QWhatsThis.leaveWhatsThisMode()
+            self.show_help_message()
+            return True
+        return super().event(event)
+    # --- END FIX ---
+
+    def show_help_message(self):
+        QMessageBox.information(self, "Traceroute Help",
+                                "This tool performs a continuous traceroute (like 'mtr' or 'pathping') to the selected IP address.\n\n"
+                                "It shows each network hop (router) between you and the destination, displaying real-time statistics like latency (RTT) and packet loss for each hop.")
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(self, 'Window Close', 'Are you sure you want to close the window?',
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-        if reply == QMessageBox.Yes:
-            self.stop_analysis()
-            event.accept()
+        """Handles the 'X' button click."""
+        if self.worker and self.thread and self.thread.isRunning():
+            reply = QMessageBox.question(self, 'Window Close',
+                                         'A path analysis is running. Are you sure you want to stop it and close the window?',
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self._is_closing = True
+                self.stop_analysis()
+                event.ignore()
+            else:
+                event.ignore()
         else:
-            event.ignore()
-
-    def contextMenuEvent(self, event):
-        # In a QDialog, the question mark button emits a help request event.
-        # We can catch this and show our message box.
-        QMessageBox.information(self, "Traceroute Help",
-                                "This tool performs a traceroute to the selected IP address.\n\n"
-                                "It shows the path that packets take to reach the destination, "
-                                "displaying each hop along the way with its latency and packet loss.")
-
+            event.accept()
 class PathAnalysisWorker(QObject):
     hop_data_updated = Signal(dict)
     finished = Signal()
@@ -2908,6 +3020,9 @@ class SinglePortScanWorker(QObject):
             # DEBUG LOG: Announce that the worker is finished and will emit the signal
             self.finished.emit()
 
+
+import traceback
+
 class PacketCaptureWorker(QObject):
     packet_captured = Signal(object)
     finished = Signal()
@@ -2922,21 +3037,25 @@ class PacketCaptureWorker(QObject):
     def stop(self):
         self._is_running = False
 
-    def _process_packet(self, packet):
-        if not self._is_running:
-            return
-        self.packet_captured.emit(packet)
-
     @Slot()
     def run(self):
-        while self._is_running:
-            try:
-                scapy.all.sniff(iface=self.interface, filter=self.bpf_filter, prn=self._process_packet, timeout=1)
-            except Exception as e:
-                self.error.emit(f"An error occurred during packet capture: {e}")
-                break
+        """Starts the sniffing process using the stable 'stop_filter' mechanism."""
+        try:
+            print(f"Starting sniff on interface '{self.interface}'...")
+            scapy.all.sniff(
+                iface=self.interface,
+                filter=self.bpf_filter,
+                prn=self.packet_captured.emit,
+                stop_filter=lambda p: not self._is_running
+            )
+        except Exception as e:
+            print(f"CRITICAL ERROR in PacketCaptureWorker: {e}")
+            traceback.print_exc()
+            self.error.emit(f"Capture failed: {e}")
+        
+        print("Packet capture worker has finished.")
         self.finished.emit()
-
+        
 # --- Main Execution ---
 if __name__ == "__main__":
     if hasattr(Qt, 'AA_EnableHighDpiScaling'): QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
