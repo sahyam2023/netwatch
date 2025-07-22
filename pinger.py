@@ -15,7 +15,7 @@ import socket
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
-    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog
+    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
@@ -750,6 +750,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_selected_button = QPushButton("Save Selected Logs"); self.save_selected_button.setEnabled(False)
         self.scan_ports_button = QPushButton("Scan Ports"); self.scan_ports_button.setEnabled(False)
         self.traceroute_button = QPushButton("Traceroute"); self.traceroute_button.setEnabled(False)
+        self.live_path_analysis_button = QPushButton("Live Path Analysis"); self.live_path_analysis_button.setEnabled(False)
         self.select_ips_button = QPushButton("Select IPs"); self.select_ips_button.setCheckable(True); self.select_ips_button.setEnabled(False)
         self.show_graph_button = QPushButton("Show Graph"); self.show_graph_button.setEnabled(False)
         control_layout.addWidget(self.start_button); control_layout.addWidget(self.stop_button); control_layout.addWidget(self.save_button)
@@ -757,6 +758,7 @@ class PingMonitorWindow(QMainWindow):
         control_layout.addWidget(self.save_selected_button)
         control_layout.addWidget(self.scan_ports_button)
         control_layout.addWidget(self.traceroute_button)
+        control_layout.addWidget(self.live_path_analysis_button)
         control_layout.addWidget(self.show_graph_button)
         control_layout.addStretch(1)
         control_layout.addWidget(self.select_ips_button)
@@ -837,8 +839,21 @@ class PingMonitorWindow(QMainWindow):
         self.reset_button.clicked.connect(self.reset_application)
         self.scan_ports_button.clicked.connect(self.start_port_scan)
         self.traceroute_button.clicked.connect(self.start_traceroute)
+        self.live_path_analysis_button.clicked.connect(self.start_live_path_analysis)
         self.single_port_scan_button.clicked.connect(self.start_single_port_scan)
         self.show_graph_button.clicked.connect(self._open_graph_window)
+
+    def start_live_path_analysis(self):
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            QMessageBox.information(self, "No Selection", "Please select an IP to analyze.")
+            return
+
+        source_index = self.proxy_model.mapToSource(selected_indexes[0])
+        ip_address = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
+
+        dialog = LivePathAnalysisWindow(ip_address, self)
+        dialog.exec_()
 
     def _open_graph_window(self):
         selected_indexes = self.results_view.selectionModel().selectedRows()
@@ -1273,6 +1288,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_selected_button.setEnabled(False)
         self.scan_ports_button.setEnabled(False)
         self.traceroute_button.setEnabled(False)
+        self.live_path_analysis_button.setEnabled(False)
         self.show_graph_button.setEnabled(True)
         self.select_ips_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
@@ -1508,6 +1524,7 @@ class PingMonitorWindow(QMainWindow):
         self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
         self.scan_ports_button.setEnabled(True)
         self.traceroute_button.setEnabled(True)
+        self.live_path_analysis_button.setEnabled(True)
         self.show_graph_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
@@ -1932,6 +1949,132 @@ class TracerouteDialog(QDialog):
 
     def on_finished(self, final_message):
         self.results_text.append(f"\n{final_message}")
+
+class LivePathAnalysisWindow(QDialog):
+    def __init__(self, ip_address, parent=None):
+        super().__init__(parent)
+        self.ip_address = ip_address
+        self.setWindowTitle(f"Live Path Analysis to {self.ip_address}")
+        self.setMinimumSize(800, 600)
+
+        self.layout = QVBoxLayout(self)
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Hop #", "Hostname", "Packet Loss (%)", "Sent Packets", "Last RTT", "Average RTT", "Jitter (Std. Dev.)"])
+        self.layout.addWidget(self.table)
+
+        self.button_layout = QHBoxLayout()
+        self.start_button = QPushButton("Start")
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.button_layout.addWidget(self.start_button)
+        self.button_layout.addWidget(self.stop_button)
+        self.layout.addLayout(self.button_layout)
+
+        self.start_button.clicked.connect(self.start_analysis)
+        self.stop_button.clicked.connect(self.stop_analysis)
+
+        self.worker = None
+        self.thread = None
+
+    def start_analysis(self):
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.thread = QThread(self)
+        self.worker = PathAnalysisWorker(self.ip_address)
+        self.worker.moveToThread(self.thread)
+        self.worker.hop_data_updated.connect(self.update_table)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.started.connect(self.worker.run)
+        self.thread.start()
+
+    def stop_analysis(self):
+        if self.worker:
+            self.worker.stop()
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+
+    def update_table(self, data):
+        distance = data['distance']
+        hostname = data['hostname']
+        
+        # Check if the hop is already in the table
+        items = self.table.findItems(str(distance), Qt.MatchExactly)
+        if items:
+            row = items[0].row()
+        else:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(str(distance)))
+            self.table.setItem(row, 1, QTableWidgetItem(hostname))
+
+        self.table.setItem(row, 2, QTableWidgetItem(f"{data['packet_loss']:.1f}"))
+        self.table.setItem(row, 3, QTableWidgetItem(str(data['sent'])))
+        self.table.setItem(row, 4, QTableWidgetItem(f"{data['last_rtt']:.1f}"))
+        self.table.setItem(row, 5, QTableWidgetItem(f"{data['avg_rtt']:.1f}"))
+        self.table.setItem(row, 6, QTableWidgetItem(f"{data['jitter']:.1f}"))
+
+    def closeEvent(self, event):
+        self.stop_analysis()
+        event.accept()
+
+class PathAnalysisWorker(QObject):
+    hop_data_updated = Signal(dict)
+    finished = Signal()
+
+    def __init__(self, ip_address):
+        super().__init__()
+        self.ip_address = ip_address
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    @Slot()
+    def run(self):
+        hop_stats = {}
+        while self._is_running:
+            try:
+                hops = icmplib.traceroute(self.ip_address, count=1, interval=0.05, timeout=1, max_hops=30)
+                for hop in hops:
+                    if hop.address not in hop_stats:
+                        hop_stats[hop.address] = {
+                            'distance': hop.distance,
+                            'hostname': hop.address,
+                            'sent': 0,
+                            'lost': 0,
+                            'rtts': [],
+                        }
+                    
+                    stats = hop_stats[hop.address]
+                    stats['sent'] += 1
+                    if not hop.is_alive:
+                        stats['lost'] += 1
+                    else:
+                        stats['rtts'].append(hop.avg_rtt)
+
+                    # Calculate stats
+                    packet_loss = (stats['lost'] / stats['sent']) * 100 if stats['sent'] > 0 else 0
+                    last_rtt = stats['rtts'][-1] if stats['rtts'] else 0
+                    avg_rtt = sum(stats['rtts']) / len(stats['rtts']) if stats['rtts'] else 0
+                    jitter = (sum((x - avg_rtt) ** 2 for x in stats['rtts']) / len(stats['rtts'])) ** 0.5 if len(stats['rtts']) > 1 else 0
+
+                    self.hop_data_updated.emit({
+                        'distance': stats['distance'],
+                        'hostname': stats['hostname'],
+                        'packet_loss': packet_loss,
+                        'sent': stats['sent'],
+                        'last_rtt': last_rtt,
+                        'avg_rtt': avg_rtt,
+                        'jitter': jitter,
+                    })
+                time.sleep(1)
+            except Exception as e:
+                print(f"Traceroute error: {e}")
+                time.sleep(1)
+        self.finished.emit()
 
 class TracerouteWorker(QObject):
     hop_received = Signal(str)
