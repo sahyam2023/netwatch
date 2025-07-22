@@ -15,7 +15,7 @@ import socket
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
-    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter
+    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog
 )
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
@@ -567,6 +567,8 @@ class PingMonitorWindow(QMainWindow):
         self.current_payload_size = 32; self.active_workers_count = 0
         self.worker_threads = {} # {ip: (QThread, PingWorker)}
         self.port_scan_threads = {} # {ip: (QThread, PortScanWorker)}
+        self.single_scan_thread = None
+        self.single_scan_worker = None
         self.stop_event = threading.Event()
 
         # --- NEW: Data Structures for Batching ---
@@ -656,6 +658,24 @@ class PingMonitorWindow(QMainWindow):
         top_row_layout.addWidget(range_group)
 
         top_row_layout.addStretch(1)
+        
+        # Single Port Scan Group
+        port_scan_group = QGroupBox("Single Port Scan")
+        port_scan_layout = QHBoxLayout(port_scan_group)
+        port_scan_layout.setSpacing(8)
+        port_scan_layout.addWidget(QLabel("IP Address:"))
+        self.single_port_ip_input = QLineEdit()
+        self.single_port_ip_input.setPlaceholderText("e.g., 8.8.8.8")
+        port_scan_layout.addWidget(self.single_port_ip_input)
+        port_scan_layout.addWidget(QLabel("Port:"))
+        self.single_port_input = QLineEdit()
+        self.single_port_input.setPlaceholderText("e.g., 443")
+        self.single_port_input.setFixedWidth(60)
+        port_scan_layout.addWidget(self.single_port_input)
+        self.single_port_scan_button = QPushButton("Scan Port")
+        port_scan_layout.addWidget(self.single_port_scan_button)
+        top_row_layout.addWidget(port_scan_group)
+
         config_layout.addLayout(top_row_layout)
 
         # IP Input Area
@@ -715,11 +735,13 @@ class PingMonitorWindow(QMainWindow):
         self.save_filtered_button = QPushButton("Save Timeout Logs"); self.save_filtered_button.setEnabled(False)
         self.save_selected_button = QPushButton("Save Selected Logs"); self.save_selected_button.setEnabled(False)
         self.scan_ports_button = QPushButton("Scan Ports"); self.scan_ports_button.setEnabled(False)
+        self.traceroute_button = QPushButton("Traceroute"); self.traceroute_button.setEnabled(False)
         self.select_ips_button = QPushButton("Select IPs"); self.select_ips_button.setCheckable(True); self.select_ips_button.setEnabled(False)
         control_layout.addWidget(self.start_button); control_layout.addWidget(self.stop_button); control_layout.addWidget(self.save_button)
         control_layout.addWidget(self.save_filtered_button)
         control_layout.addWidget(self.save_selected_button)
         control_layout.addWidget(self.scan_ports_button)
+        control_layout.addWidget(self.traceroute_button)
         control_layout.addStretch(1)
         control_layout.addWidget(self.select_ips_button)
         control_layout.addWidget(self.reset_button)
@@ -798,6 +820,8 @@ class PingMonitorWindow(QMainWindow):
         self.results_view.clicked.connect(self.on_row_clicked)
         self.reset_button.clicked.connect(self.reset_application)
         self.scan_ports_button.clicked.connect(self.start_port_scan)
+        self.traceroute_button.clicked.connect(self.start_traceroute)
+        self.single_port_scan_button.clicked.connect(self.start_single_port_scan)
 
     @Slot()
     def reset_application(self):
@@ -1042,10 +1066,18 @@ class PingMonitorWindow(QMainWindow):
     def toggle_selection_mode(self, checked):
         self.ping_model.selection_mode = checked
         if checked:
+            self.select_ips_button.setText("Stop Select") # Change text to be more intuitive
             self.select_ips_button.setStyleSheet("background-color: #E74C3C; color: white;") # Red when active
         else:
+            self.select_ips_button.setText("Select IPs") # Change text back to original
             # Green when inactive but enabled
             self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
+            
+            # --- FIX: Clear the selections when disabling the mode ---
+            if self.ping_model._checked_ips: # Only proceed if there are selections to clear
+                self.ping_model._checked_ips.clear()
+        
+        # Trigger a full view update to reflect text changes and cleared checkboxes
         self.proxy_model.layoutChanged.emit()
 
     def on_selection_changed(self, selected, deselected):
@@ -1080,7 +1112,7 @@ class PingMonitorWindow(QMainWindow):
         # This is a simplified way to ensure the clicked row remains 'selected'
         # visually without clearing other selections. It leverages the check state
         # as the source of truth, rather than the view's visual selection.
-        self.results_view.clearSelection()
+        # self.results_view.clearSelection()
 
     # --- Status and Logging ---
     @Slot(str, str)
@@ -1211,6 +1243,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_filtered_button.setEnabled(False)
         self.save_selected_button.setEnabled(False)
         self.scan_ports_button.setEnabled(False)
+        self.traceroute_button.setEnabled(False)
         self.select_ips_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
         self.api_ip_input.setEnabled(False); self.api_port_input.setEnabled(False); self.fetch_api_button.setEnabled(False)
@@ -1441,6 +1474,7 @@ class PingMonitorWindow(QMainWindow):
         self.select_ips_button.setEnabled(True)
         self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
         self.scan_ports_button.setEnabled(True)
+        self.traceroute_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
         self.add_range_button.setEnabled(True)
@@ -1629,6 +1663,81 @@ class PingMonitorWindow(QMainWindow):
             self._log_event_gui("Port scan complete.", "info")
             self.scan_ports_button.setEnabled(True)
 
+    @Slot()
+    def start_traceroute(self):
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            QMessageBox.information(self, "No Selection", "Please select an IP to traceroute.")
+            return
+        
+        source_index = self.proxy_model.mapToSource(selected_indexes[0])
+        ip_address = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
+        
+        dialog = TracerouteDialog(ip_address, self)
+        dialog.exec_()
+
+    @Slot()
+    def start_single_port_scan(self):
+        ip_address = self.single_port_ip_input.text().strip()
+        port_str = self.single_port_input.text().strip()
+
+        if not ip_address or not port_str:
+            QMessageBox.warning(self, "Input Error", "Please enter both an IP address and a port.")
+            return
+
+        try:
+            port = int(port_str)
+            if not (0 < port < 65536):
+                raise ValueError("Port out of range")
+        except ValueError:
+            QMessageBox.warning(self, "Input Error", "Please enter a valid port number (1-65535).")
+            return
+
+        # print("[DEBUG] Main UI: start_single_port_scan initiated.")
+        self.single_port_scan_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.update_status(f"Scanning port {port} on {ip_address}...", "running")
+        self._log_event_gui(f"Starting single port scan for {ip_address}:{port}", "info")
+
+        # --- FIX: Use self. to keep a reference to the thread and worker ---
+        self.single_scan_thread = QThread(self)
+        self.single_scan_worker = SinglePortScanWorker(ip_address, port)
+        self.single_scan_worker.moveToThread(self.single_scan_thread)
+
+        # Connect signals to slots
+        self.single_scan_worker.port_scanned.connect(self._handle_single_port_scan_result)
+        self.single_scan_worker.finished.connect(self._finalize_single_port_scan) 
+        
+        # Standard thread lifecycle management
+        self.single_scan_worker.finished.connect(self.single_scan_thread.quit)
+        self.single_scan_worker.finished.connect(self.single_scan_worker.deleteLater)
+        self.single_scan_thread.finished.connect(self.single_scan_thread.deleteLater)
+        
+        self.single_scan_thread.started.connect(self.single_scan_worker.run)
+        
+        self.single_scan_thread.start()
+
+    @Slot(str, int, bool)
+    def _handle_single_port_scan_result(self, ip_address, port, is_open):
+        # DEBUG LOG: Announce that the result has been received from the worker
+        
+        status = "OPEN" if is_open else "CLOSED"
+        
+        # --- THIS IS THE FIX ---
+        # Instead of a blocking QMessageBox, log the result to the event log.
+        # This is non-blocking and will not freeze the UI.
+        self._log_event_gui(f"Scan Result: Port {port} on {ip_address} is {status}.", "info")
+        
+    @Slot()
+    def _finalize_single_port_scan(self):
+        """ This new slot handles all cleanup after the scan is done. """
+        # DEBUG LOG: Announce that cleanup is starting
+        
+        self.single_port_scan_button.setEnabled(True)
+        self.start_button.setEnabled(True)
+        self.update_status("Idle", "idle")
+        self._log_event_gui("Single port scan finished.", "info")
+
     def closeEvent(self, event):
         """ Handles the window close event more robustly. """
         ping_active = self.monitoring_active or self.stopping_initiated
@@ -1673,6 +1782,119 @@ class PingMonitorWindow(QMainWindow):
             self._log_event_gui("Exiting application.", "info") # Direct log
             event.accept() # OK to close
 
+
+class TracerouteDialog(QDialog):
+    def __init__(self, ip_address, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Traceroute to {ip_address}")
+        self.setMinimumSize(600, 400)
+
+        self.layout = QVBoxLayout(self)
+        self.results_text = QTextEdit()
+        self.results_text.setReadOnly(True)
+        # --- IMPROVEMENT: Use a monospaced font for clean alignment ---
+        self.results_text.setFont(QFont("Consolas", 10)) 
+        self.layout.addWidget(self.results_text)
+
+        self.worker = TracerouteWorker(ip_address)
+        self.thread = QThread(self)
+        # Keep a reference to the thread and worker to prevent garbage collection
+        self.worker.moveToThread(self.thread)
+
+        self.worker.hop_received.connect(self.append_hop)
+        self.worker.finished.connect(self.on_finished)
+        
+        # Ensure proper cleanup
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        
+        self.thread.started.connect(self.worker.run)
+
+        self.thread.start()
+
+    def append_hop(self, hop_info):
+        self.results_text.append(hop_info)
+
+    def on_finished(self, final_message):
+        self.results_text.append(f"\n{final_message}")
+
+class TracerouteWorker(QObject):
+    hop_received = Signal(str)
+    finished = Signal(str)
+
+    def __init__(self, ip_address):
+        super().__init__()
+        self.ip_address = ip_address
+
+    @Slot()
+    def run(self):
+        self.hop_received.emit(f"Starting traceroute to {self.ip_address}...")
+        
+        # We still check for admin rights to provide a helpful warning if not present.
+        if not is_admin():
+            self.hop_received.emit("\nWARNING: Not running as Administrator.")
+            self.hop_received.emit("Traceroute may fail or show timeouts.")
+
+        try:
+            hops = icmplib.traceroute(self.ip_address, timeout=1, max_hops=30)
+            
+            last_distance = 0
+            for hop in hops:
+                if hop.distance > last_distance + 1:
+                    for i in range(last_distance + 1, hop.distance):
+                        self.hop_received.emit(f" {i:<2d}   *         Request timed out.")
+                
+                if hop.is_alive:
+                    self.hop_received.emit(f" {hop.distance:<2d}   {hop.avg_rtt:<5.1f} ms  {hop.address}")
+                else:
+                    self.hop_received.emit(f" {hop.distance:<2d}   *         Request timed out.")
+                
+                last_distance = hop.distance
+            
+            self.finished.emit("\nTraceroute finished.")
+
+        except icmplib.exceptions.NameLookupError:
+            self.finished.emit(f"\nTraceroute failed: Hostname '{self.ip_address}' could not be resolved.")
+        except Exception as e:
+            self.finished.emit(f"\nTraceroute failed: {e}")
+
+import socket
+from PyQt5.QtCore import QObject, pyqtSignal as Signal, pyqtSlot as Slot
+
+class SinglePortScanWorker(QObject):
+    port_scanned = Signal(str, int, bool)
+    finished = Signal()
+
+    def __init__(self, ip_address, port):
+        super().__init__()
+        self.ip_address = ip_address
+        self.port = port
+
+    @Slot()
+    def run(self):
+        # DEBUG LOG: Announce that the worker's run method has started
+        
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.5) # Use a reasonable timeout
+            
+            # DEBUG LOG: Announce the connection attempt
+            
+            result = sock.connect_ex((self.ip_address, self.port))
+            is_open = (result == 0)
+            self.port_scanned.emit(self.ip_address, self.port, is_open)
+            
+        except socket.gaierror as e:
+            self.port_scanned.emit(self.ip_address, self.port, False)
+        except Exception as e:
+            self.port_scanned.emit(self.ip_address, self.port, False)
+        finally:
+            if sock:
+                sock.close()
+            # DEBUG LOG: Announce that the worker is finished and will emit the signal
+            self.finished.emit()
 
 # --- Main Execution ---
 if __name__ == "__main__":
