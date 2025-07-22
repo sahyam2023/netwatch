@@ -1,0 +1,7 @@
+PyQt5
+pyqtgraph
+icmplib
+numpy
+sympy
+requests
+python-nmap
