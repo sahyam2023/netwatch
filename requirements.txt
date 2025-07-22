@@ -7,3 +7,4 @@ requests
 python-nmap
 dnspython
 scapy
+psutil

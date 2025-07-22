@@ -656,6 +656,7 @@ class PingMonitorWindow(QMainWindow):
         self.capture_worker = None
         self.captured_packets = deque(maxlen=MAX_PACKETS)
         self.dns_cache = {}
+        self.capture_interface_map = {}
         self.port_to_service = {
             20: "FTP-data", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
             53: "DNS", 67: "BOOTP", 68: "BOOTP", 69: "TFTP", 80: "HTTP",
@@ -1040,7 +1041,34 @@ class PingMonitorWindow(QMainWindow):
         
         capture_controls_layout.addWidget(QLabel("Interface:"))
         self.capture_interface_combo = QComboBox()
-        self.capture_interface_combo.addItems(psutil.net_if_addrs().keys())
+        # --- FIX: Populate with friendly names, map them to Scapy's internal names ---
+        try:
+            # This function returns a list of dictionaries with detailed info on Windows
+            interfaces = scapy.all.get_windows_if_list()
+            self.capture_interface_map.clear() # Clear any old data
+            
+            friendly_names_to_add = []
+            for iface in interfaces:
+                # The 'name' key is the friendly one (e.g., "Wi-Fi"),
+                # the 'guid' key is what Scapy's sniff function needs.
+                friendly_name = iface.get('name', 'Unknown Interface')
+                internal_name = iface.get('guid')
+                
+                if internal_name:
+                    self.capture_interface_map[friendly_name] = internal_name
+                    friendly_names_to_add.append(friendly_name)
+
+            if friendly_names_to_add:
+                self.capture_interface_combo.addItems(friendly_names_to_add)
+            else:
+                 # Fallback if the detailed list fails for some reason
+                scapy_interfaces = scapy.all.get_if_list()
+                self.capture_interface_combo.addItems(scapy_interfaces)
+
+        except Exception as e:
+            print(f"Could not get Scapy interfaces: {e}")
+            self.capture_interface_combo.addItem("ERROR - No Interfaces Found")
+            self.capture_start_stop_button.setEnabled(False) # Disable if we can't find any
         capture_controls_layout.addWidget(self.capture_interface_combo)
 
         capture_controls_layout.addWidget(QLabel("Filter (BPF):"))
@@ -1253,17 +1281,21 @@ class PingMonitorWindow(QMainWindow):
             self.capture_model.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
             self.captured_packets.clear()
             
-            interface = self.capture_interface_combo.currentText()
+            selected_friendly_name = self.capture_interface_combo.currentText()
+            # Use the map to get the real interface name for Scapy
+            interface = self.capture_interface_map.get(selected_friendly_name, selected_friendly_name)
             bpf_filter = self.capture_filter_input.text().strip()
 
-            self.capture_thread = QThread()
+            self.capture_thread = QThread(self)
             self.capture_worker = PacketCaptureWorker(interface, bpf_filter)
             self.capture_worker.moveToThread(self.capture_thread)
 
             self.capture_worker.packet_captured.connect(self.update_capture_table)
+            self.capture_worker.error.connect(self.handle_capture_error)
             self.capture_worker.finished.connect(self.capture_thread.quit)
             self.capture_worker.finished.connect(self.capture_worker.deleteLater)
             self.capture_thread.finished.connect(self.capture_thread.deleteLater)
+            self.capture_thread.finished.connect(self._on_capture_thread_finished) # <-- ADD THIS CONNECTION
 
             self.capture_thread.started.connect(self.capture_worker.run)
             self.capture_thread.start()
@@ -1287,6 +1319,16 @@ class PingMonitorWindow(QMainWindow):
 
         # Update raw bytes view
         self.raw_bytes_text.setText(self.format_raw_bytes(packet))
+
+    @Slot()
+    def _on_capture_thread_finished(self):
+        """Resets thread-related attributes after the capture thread has been deleted."""
+        print("Capture thread has finished and is being cleaned up.")
+        self.capture_thread = None
+        self.capture_worker = None
+        # Re-enable buttons if they were disabled during a stop sequence
+        self.capture_start_stop_button.setText("Start Capture")
+        self.capture_start_stop_button.setEnabled(True)
 
     def populate_dissection_tree(self, model, packet):
         parent_item = model.invisibleRootItem()
@@ -1431,6 +1473,11 @@ class PingMonitorWindow(QMainWindow):
     def handle_dns_error(self, error_message):
         self.dns_results_text_edit.clear()
         self.dns_results_text_edit.append(error_message)
+
+    def handle_capture_error(self, error_message):
+        QMessageBox.critical(self, "Capture Error", error_message)
+        self.capture_start_stop_button.setText("Start Capture")
+        self.capture_save_button.setEnabled(False)
 
     def stop_scan(self):
         if hasattr(self, 'nmap_worker') and self.nmap_worker:
@@ -2864,6 +2911,7 @@ class SinglePortScanWorker(QObject):
 class PacketCaptureWorker(QObject):
     packet_captured = Signal(object)
     finished = Signal()
+    error = Signal(str)
 
     def __init__(self, interface, bpf_filter):
         super().__init__()
@@ -2881,7 +2929,12 @@ class PacketCaptureWorker(QObject):
 
     @Slot()
     def run(self):
-        scapy.all.sniff(iface=self.interface, filter=self.bpf_filter, prn=self._process_packet, stop_filter=lambda p: not self._is_running)
+        while self._is_running:
+            try:
+                scapy.all.sniff(iface=self.interface, filter=self.bpf_filter, prn=self._process_packet, timeout=1)
+            except Exception as e:
+                self.error.emit(f"An error occurred during packet capture: {e}")
+                break
         self.finished.emit()
 
 # --- Main Execution ---
