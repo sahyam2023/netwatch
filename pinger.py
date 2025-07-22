@@ -750,7 +750,6 @@ class PingMonitorWindow(QMainWindow):
         self.save_selected_button = QPushButton("Save Selected Logs"); self.save_selected_button.setEnabled(False)
         self.scan_ports_button = QPushButton("Scan Ports"); self.scan_ports_button.setEnabled(False)
         self.traceroute_button = QPushButton("Traceroute"); self.traceroute_button.setEnabled(False)
-        self.live_path_analysis_button = QPushButton("Live Path Analysis"); self.live_path_analysis_button.setEnabled(False)
         self.select_ips_button = QPushButton("Select IPs"); self.select_ips_button.setCheckable(True); self.select_ips_button.setEnabled(False)
         self.show_graph_button = QPushButton("Show Graph"); self.show_graph_button.setEnabled(False)
         control_layout.addWidget(self.start_button); control_layout.addWidget(self.stop_button); control_layout.addWidget(self.save_button)
@@ -758,7 +757,6 @@ class PingMonitorWindow(QMainWindow):
         control_layout.addWidget(self.save_selected_button)
         control_layout.addWidget(self.scan_ports_button)
         control_layout.addWidget(self.traceroute_button)
-        control_layout.addWidget(self.live_path_analysis_button)
         control_layout.addWidget(self.show_graph_button)
         control_layout.addStretch(1)
         control_layout.addWidget(self.select_ips_button)
@@ -839,21 +837,8 @@ class PingMonitorWindow(QMainWindow):
         self.reset_button.clicked.connect(self.reset_application)
         self.scan_ports_button.clicked.connect(self.start_port_scan)
         self.traceroute_button.clicked.connect(self.start_traceroute)
-        self.live_path_analysis_button.clicked.connect(self.start_live_path_analysis)
         self.single_port_scan_button.clicked.connect(self.start_single_port_scan)
         self.show_graph_button.clicked.connect(self._open_graph_window)
-
-    def start_live_path_analysis(self):
-        selected_indexes = self.results_view.selectionModel().selectedRows()
-        if not selected_indexes:
-            QMessageBox.information(self, "No Selection", "Please select an IP to analyze.")
-            return
-
-        source_index = self.proxy_model.mapToSource(selected_indexes[0])
-        ip_address = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
-
-        dialog = LivePathAnalysisWindow(ip_address, self)
-        dialog.exec_()
 
     def _open_graph_window(self):
         selected_indexes = self.results_view.selectionModel().selectedRows()
@@ -1288,7 +1273,6 @@ class PingMonitorWindow(QMainWindow):
         self.save_selected_button.setEnabled(False)
         self.scan_ports_button.setEnabled(False)
         self.traceroute_button.setEnabled(False)
-        self.live_path_analysis_button.setEnabled(False)
         self.show_graph_button.setEnabled(True)
         self.select_ips_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
@@ -1524,7 +1508,6 @@ class PingMonitorWindow(QMainWindow):
         self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
         self.scan_ports_button.setEnabled(True)
         self.traceroute_button.setEnabled(True)
-        self.live_path_analysis_button.setEnabled(True)
         self.show_graph_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
@@ -1724,7 +1707,7 @@ class PingMonitorWindow(QMainWindow):
         source_index = self.proxy_model.mapToSource(selected_indexes[0])
         ip_address = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
         
-        dialog = TracerouteDialog(ip_address, self)
+        dialog = LivePathAnalysisWindow(ip_address, self)
         dialog.exec_()
 
     @Slot()
@@ -1914,41 +1897,6 @@ class GraphWindow(QMainWindow):
 
         self.stats_label.setText(f"Avg: {avg_rtt:.1f} ms | Jitter: {jitter:.1f} ms | Packet Loss: {packet_loss:.1f}%")
 
-class TracerouteDialog(QDialog):
-    def __init__(self, ip_address, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Traceroute to {ip_address}")
-        self.setMinimumSize(600, 400)
-
-        self.layout = QVBoxLayout(self)
-        self.results_text = QTextEdit()
-        self.results_text.setReadOnly(True)
-        # --- IMPROVEMENT: Use a monospaced font for clean alignment ---
-        self.results_text.setFont(QFont("Consolas", 10)) 
-        self.layout.addWidget(self.results_text)
-
-        self.worker = TracerouteWorker(ip_address)
-        self.thread = QThread(self)
-        # Keep a reference to the thread and worker to prevent garbage collection
-        self.worker.moveToThread(self.thread)
-
-        self.worker.hop_received.connect(self.append_hop)
-        self.worker.finished.connect(self.on_finished)
-        
-        # Ensure proper cleanup
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        
-        self.thread.started.connect(self.worker.run)
-
-        self.thread.start()
-
-    def append_hop(self, hop_info):
-        self.results_text.append(hop_info)
-
-    def on_finished(self, final_message):
-        self.results_text.append(f"\n{final_message}")
 
 class LivePathAnalysisWindow(QDialog):
     def __init__(self, ip_address, parent=None):
@@ -2076,45 +2024,6 @@ class PathAnalysisWorker(QObject):
                 time.sleep(1)
         self.finished.emit()
 
-class TracerouteWorker(QObject):
-    hop_received = Signal(str)
-    finished = Signal(str)
-
-    def __init__(self, ip_address):
-        super().__init__()
-        self.ip_address = ip_address
-
-    @Slot()
-    def run(self):
-        self.hop_received.emit(f"Starting traceroute to {self.ip_address}...")
-        
-        # We still check for admin rights to provide a helpful warning if not present.
-        if not is_admin():
-            self.hop_received.emit("\nWARNING: Not running as Administrator.")
-            self.hop_received.emit("Traceroute may fail or show timeouts.")
-
-        try:
-            hops = icmplib.traceroute(self.ip_address, timeout=1, max_hops=30)
-            
-            last_distance = 0
-            for hop in hops:
-                if hop.distance > last_distance + 1:
-                    for i in range(last_distance + 1, hop.distance):
-                        self.hop_received.emit(f" {i:<2d}   *         Request timed out.")
-                
-                if hop.is_alive:
-                    self.hop_received.emit(f" {hop.distance:<2d}   {hop.avg_rtt:<5.1f} ms  {hop.address}")
-                else:
-                    self.hop_received.emit(f" {hop.distance:<2d}   *         Request timed out.")
-                
-                last_distance = hop.distance
-            
-            self.finished.emit("\nTraceroute finished.")
-
-        except icmplib.exceptions.NameLookupError:
-            self.finished.emit(f"\nTraceroute failed: Hostname '{self.ip_address}' could not be resolved.")
-        except Exception as e:
-            self.finished.emit(f"\nTraceroute failed: {e}")
 
 import socket
 from PyQt5.QtCore import QObject, pyqtSignal as Signal, pyqtSlot as Slot
