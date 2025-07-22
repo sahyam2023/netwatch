@@ -790,8 +790,8 @@ class PingMonitorWindow(QMainWindow):
         super().__init__()
         # ... (Window setup, icon setup - same as before) ...
         self.setWindowTitle("PingWatch")
-        self.setMinimumSize(900, 700)
-        self.resize(1280, 720)
+        self.setMinimumSize(850, 600) # Reduced minimum height
+        self.resize(1200, 700) 
         # Correct path finding for bundled app
         if getattr(sys, 'frozen', False): base_path = sys._MEIPASS
         else: base_path = os.path.dirname(os.path.abspath(__file__))
@@ -934,6 +934,7 @@ class PingMonitorWindow(QMainWindow):
 
         # API Fetch Controls
         api_fetch_group = QGroupBox("API Fetch")
+        api_fetch_group.setObjectName("compactGroup")
         api_fetch_layout = QHBoxLayout(api_fetch_group)
         api_fetch_layout.setSpacing(8)
         api_fetch_layout.addWidget(QLabel("Server IP:"))
@@ -953,6 +954,7 @@ class PingMonitorWindow(QMainWindow):
 
         # IP Range Group
         range_group = QGroupBox("Add IP Range")
+        range_group.setObjectName("compactGroup")
         range_layout = QHBoxLayout(range_group)
         range_layout.setSpacing(8)
         range_layout.addWidget(QLabel("Start IP:"))
@@ -987,7 +989,7 @@ class PingMonitorWindow(QMainWindow):
         self.ip_text_edit = QTextEdit()
         self.ip_text_edit.setPlaceholderText(f"Enter one target per line (Max: {MAX_IPS})...")
         self.ip_text_edit.setAcceptRichText(False)
-        self.ip_text_edit.setFixedHeight(100) # Give it a bit more space
+        self.ip_text_edit.setMaximumHeight(120)
         sidebar_layout.addWidget(self.ip_text_edit)
 
         # Duration and Payload Settings
@@ -1026,25 +1028,26 @@ class PingMonitorWindow(QMainWindow):
 
         # Secondary Actions Button Bar
         button_grid_layout = QGridLayout()
-        self.save_button = QPushButton("Save All Logs")
-        self.save_button.setEnabled(False)
-        self.save_filtered_button = QPushButton("Save Timeout Logs")
-        self.save_filtered_button.setEnabled(False)
-        self.save_selected_button = QPushButton("Save Selected Logs")
-        self.save_selected_button.setEnabled(False)
-        self.scan_ports_button = QPushButton("Scan Ports")
-        self.scan_ports_button.setEnabled(False)
-        self.traceroute_button = QPushButton("Traceroute")
-        self.traceroute_button.setEnabled(False)
-        self.show_graph_button = QPushButton("Show Graph")
-        self.show_graph_button.setEnabled(False)
+
+        # --- NEW: The Actions Menu Button ---
+        self.actions_button = QPushButton("Actions for Selected IPs")
+        self.actions_button.setEnabled(False) # Disabled by default
+        self.actions_button.setToolTip("Perform actions like Graph, Traceroute, or Port Scan on selected IPs.")
+        button_grid_layout.addWidget(self.actions_button, 0, 0, 1, 3) # Span across the top
+        # --- END NEW ---
+
+        self.save_logs_button = QPushButton("Save Logs...")
+        # The old line was: button_grid_layout.addWidget(self.save_logs_button, 0, 0, 1, 3)
+        # We move it down a row to make space for the new button
+        button_grid_layout.addWidget(self.save_logs_button, 1, 0, 1, 3)
+        
         self.select_ips_button = QPushButton("Select IPs")
         self.select_ips_button.setCheckable(True)
         self.select_ips_button.setEnabled(False)
-        
-        self.save_logs_button = QPushButton("Save Logs...")
-        button_grid_layout.addWidget(self.save_logs_button, 0, 0, 1, 3)
-        button_grid_layout.addWidget(self.select_ips_button, 1, 0, 1, 3)
+        # The old line was: button_grid_layout.addWidget(self.select_ips_button, 1, 0, 1, 3)
+        # We move it down a row
+        button_grid_layout.addWidget(self.select_ips_button, 2, 0, 1, 3)
+
         sidebar_layout.addLayout(button_grid_layout)
 
         sidebar_layout.addStretch(1)
@@ -1388,6 +1391,12 @@ class PingMonitorWindow(QMainWindow):
         self.results_view.clicked.connect(self.on_row_clicked)
         self.results_view.customContextMenuRequested.connect(self.show_results_context_menu)
         self.reset_button.clicked.connect(self.reset_application)
+        # --- NEW CONNECTIONS ---
+        # 1. Update button state when selection changes
+        self.results_view.selectionModel().selectionChanged.connect(self.on_results_selection_changed)
+        # 2. Show the menu when the button is clicked
+        self.actions_button.clicked.connect(self.show_actions_menu)
+        # --- END NEW ---
         self.start_scan_button.clicked.connect(self.handle_scan_request)
         self.stop_scan_button.clicked.connect(self.stop_scan)
         self.start_dns_query_button.clicked.connect(self.start_dns_query)
@@ -1416,6 +1425,36 @@ class PingMonitorWindow(QMainWindow):
             self.save_log(filter_type="timeout")
         elif action == selected_action:
             self.save_log(filter_type="selected")
+
+    @Slot()
+    def on_results_selection_changed(self):
+        """Enables or disables the actions button based on selection."""
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        # Enable the button only if one or more rows are selected
+        self.actions_button.setEnabled(len(selected_indexes) > 0)
+
+    @Slot()
+    def show_actions_menu(self):
+        """Creates, positions, and shows the context menu directly below the Actions button."""
+        # Get the bottom-left corner of the button in global screen coordinates
+        button_pos = self.actions_button.mapToGlobal(QPoint(0, self.actions_button.height()))
+
+        # Create the menu
+        menu = QMenu(self)
+        scan_ports_action = menu.addAction("Scan Ports")
+        traceroute_action = menu.addAction("Traceroute")
+        show_graph_action = menu.addAction("Show Graph")
+        
+        # Show the menu at the calculated position
+        action = menu.exec_(button_pos)
+
+        # Handle the selected action
+        if action == scan_ports_action:
+            self.start_port_scan()
+        elif action == traceroute_action:
+            self.start_traceroute()
+        elif action == show_graph_action:
+            self._open_graph_window()
 
     def show_results_context_menu(self, pos):
         selected_indexes = self.results_view.selectionModel().selectedRows()
@@ -1997,9 +2036,6 @@ class PingMonitorWindow(QMainWindow):
             self.start_button.setStyleSheet("")
             self.stop_button.setEnabled(False)
             self.stop_button.setStyleSheet("")
-            self.save_button.setEnabled(False)
-            self.save_filtered_button.setEnabled(False)
-            self.save_selected_button.setEnabled(False)
             self.select_ips_button.setEnabled(False)
             self.select_ips_button.setChecked(False)
             self.select_ips_button.setStyleSheet("")
@@ -2035,6 +2071,7 @@ class PingMonitorWindow(QMainWindow):
         qss = f"""
             QMainWindow, QWidget {{ background-color: {colors["bg"]}; color: {colors["text"]}; font-size: 9pt; }}
             QGroupBox {{ background-color: {colors["group_bg"]}; border: 1px solid {colors["border"]}; border-radius: 5px; margin-top: 10px; padding: 10px 5px 5px 5px; }}
+            QGroupBox#compactGroup {{margin-top: 8px; padding-top: 5px; padding-bottom: 5px;}}
             QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top center; padding: 0 5px; background-color: {colors["group_bg"]}; border-radius: 3px; color: {colors["text_light"]}; font-weight: bold; }}
             QLabel {{ background-color: transparent; padding: 2px; }}
             QLineEdit, QTextEdit {{ background-color: {colors["input_bg"]}; border: 1px solid {colors["border"]}; border-radius: 3px; padding: 5px; selection-background-color: {colors["accent"]}; selection-color: white; }}
@@ -2053,12 +2090,16 @@ class PingMonitorWindow(QMainWindow):
             QPushButton#resetButton:disabled {{ background-color: #F5B7B1; border-color: #E6B0AA; }}
             QProgressBar {{ border: 1px solid {colors["border"]}; border-radius: 3px; text-align: center; background-color: {colors["input_bg"]}; }}
             QProgressBar::chunk {{ background-color: {colors["accent"]}; border-radius: 2px; margin: 1px; }}
+            QTabWidget::pane {{ border-top: 1px solid {colors["border"]}; }}
+            QTabBar::tab {{ border: 1px solid {colors["border"]}; border-bottom: none; padding: 6px 12px; border-top-left-radius: 4px; border-top-right-radius: 4px; background-color: {colors["group_bg"]}; margin-right: 2px; }}
+            QTabBar::tab:selected {{ background-color: {colors["bg"]}; border-bottom: 1px solid {colors["bg"]}; }}
+            QTabBar::tab:!selected:hover {{ background-color: #D5DBDB; }}
             QTreeWidget {{ border: 1px solid {colors["border"]}; alternate-background-color: {colors["alt_row"]}; background-color: {colors["input_bg"]}; gridline-color: #E0E0E0; }}
             QHeaderView::section {{ background-color: {colors["header"]}; padding: 4px; border: none; border-right: 1px solid {colors["border"]}; border-bottom: 1px solid {colors["border"]}; font-weight: bold; }}
             QHeaderView::section:last {{ border-right: none; }}
             QTreeWidgetItem {{ padding: 3px; }}
             AnimatedLabel {{ border: 1px solid #B0B0B0; border-radius: 3px; padding: 6px; }}
-            QLabel#creditLabel {{ color: {colors["credit_text"]}; font-size: 8pt; padding-top: 5px; padding-bottom: 2px; }}
+            QLabel#creditLabel {{ color: {colors["credit_text"]}; font-size: 8pt; padding-top: 1px; padding-bottom: 1px; }}
             QLabel#ipCountLabel {{
                 color: {colors["count_text"]};
                 font-size: 8pt; /* Make it slightly smaller */
@@ -2377,12 +2418,7 @@ class PingMonitorWindow(QMainWindow):
         self.stop_button.setEnabled(True)
         self.stop_button.setStyleSheet("background-color: #E74C3C; color: white; border: none; font-weight: bold;")
         self.reset_button.setEnabled(False)
-        self.save_button.setEnabled(False)
-        self.save_filtered_button.setEnabled(False)
-        self.save_selected_button.setEnabled(False)
-        self.scan_ports_button.setEnabled(False)
-        self.traceroute_button.setEnabled(False)
-        self.show_graph_button.setEnabled(True)
+        self.actions_button.setEnabled(True)
         self.select_ips_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
         self.api_ip_input.setEnabled(False); self.api_port_input.setEnabled(False); self.fetch_api_button.setEnabled(False)
@@ -2613,14 +2649,9 @@ class PingMonitorWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.stop_button.setStyleSheet("") # Reset stylesheet
         self.reset_button.setEnabled(True)
-        self.save_button.setEnabled(True)
-        self.save_filtered_button.setEnabled(True)
-        self.save_selected_button.setEnabled(True)
         self.select_ips_button.setEnabled(True)
         self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
-        self.scan_ports_button.setEnabled(True)
-        self.traceroute_button.setEnabled(True)
-        self.show_graph_button.setEnabled(True)
+        self.actions_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
         self.add_range_button.setEnabled(True)
@@ -2803,12 +2834,23 @@ class PingMonitorWindow(QMainWindow):
             QMessageBox.warning(self, "Action Not Allowed", "Cannot start port scan while monitoring is active.")
             return
 
-        selected_ips = list(self.ping_model._checked_ips)
-        if not selected_ips:
-            QMessageBox.information(self, "No Selection", "Please check the boxes next to the IPs you want to scan.")
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            QMessageBox.information(self, "No Selection", "Please select one or more IPs from the table to scan.")
             return
 
-        self.scan_ports_button.setEnabled(False)
+        selected_ips = []
+        for index in selected_indexes:
+            source_index = self.proxy_model.mapToSource(index)
+            ip = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
+            selected_ips.append(ip)
+
+        if not selected_ips:
+            # This case should ideally not be hit if selected_indexes is not empty, but it's a good safeguard.
+            QMessageBox.information(self, "No Selection", "Could not retrieve IP addresses for the selected rows.")
+            return
+
+        self.actions_button.setEnabled(False) # Disable button during scan
         self.update_status(f"Scanning ports on {len(selected_ips)} IPs...", "running")
         self._log_event_gui(f"Starting port scan for {len(selected_ips)} selected IPs.", "info")
 
@@ -2841,7 +2883,7 @@ class PingMonitorWindow(QMainWindow):
         if not self.port_scan_threads:
             self.update_status("Port scan finished.", "finished")
             self._log_event_gui("Port scan complete.", "info")
-            self.scan_ports_button.setEnabled(True)
+            self.actions_button.setEnabled(True)
 
     @Slot()
     def start_traceroute(self):
