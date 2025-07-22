@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
     QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
-    QCheckBox, QTabWidget, QGridLayout, QComboBox
+    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
@@ -45,6 +45,7 @@ MAX_PAYLOAD_SIZE = 900
 MAX_LOGS_PER_UPDATE = 100
 GUI_UPDATE_INTERVAL_MS = 300 # <<< How often to update the GUI (milliseconds)
 MAX_LOG_QUEUE_SIZE = 2000   # <<< Prevent log queue from growing indefinitely
+MAX_PACKETS = 50000         # <<< Prevent captured packets list from growing indefinitely
 
 # --- Helper Function for Admin Check (Windows Only) ---
 def is_admin():
@@ -487,6 +488,32 @@ class PingWorker(QObject):
         # Emit final status directly to the GUI item one last time
         self.final_status_update.emit(self.ip_address, final_status_text, final_status_level)
         self.finished.emit(self.ip_address)
+class PacketCaptureProxyModel(QSortFilterProxyModel):
+    def filterAcceptsRow(self, source_row, source_parent):
+        if not self.filterRegExp().pattern():
+            return True
+
+        for i in range(self.sourceModel().columnCount()):
+            index = self.sourceModel().index(source_row, i, source_parent)
+            if self.filterRegExp().indexIn(self.sourceModel().data(index)) != -1:
+                return True
+        return False
+
+class ReverseDnsWorker(QObject):
+    finished = Signal(str, str)
+
+    def __init__(self, ip_address):
+        super().__init__()
+        self.ip_address = ip_address
+
+    @Slot()
+    def run(self):
+        try:
+            hostname = socket.gethostbyaddr(self.ip_address)[0]
+            self.finished.emit(self.ip_address, hostname)
+        except (socket.herror, socket.gaierror):
+            self.finished.emit(self.ip_address, self.ip_address)
+
 # --- Custom Sort Proxy Model ---
 class SortFilterProxyModel(QSortFilterProxyModel):
     """ A proxy model to enable custom sorting, especially for IP addresses. """
@@ -627,7 +654,27 @@ class PingMonitorWindow(QMainWindow):
         self.stop_event = threading.Event()
         self.capture_thread = None
         self.capture_worker = None
-        self.captured_packets = []
+        self.captured_packets = deque(maxlen=MAX_PACKETS)
+        self.dns_cache = {}
+        self.port_to_service = {
+            20: "FTP-data", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
+            53: "DNS", 67: "BOOTP", 68: "BOOTP", 69: "TFTP", 80: "HTTP",
+            110: "POP3", 119: "NNTP", 123: "NTP", 135: "MSRPC", 137: "NetBIOS-NS",
+            138: "NetBIOS-DGM", 139: "NetBIOS-SSN", 143: "IMAP", 161: "SNMP",
+            162: "SNMP-trap", 389: "LDAP", 443: "HTTPS", 445: "SMB",
+            514: "Syslog", 546: "DHCPv6-client", 547: "DHCPv6-server",
+            993: "IMAPS", 995: "POP3S", 1080: "SOCKS", 1433: "MSSQL",
+            1521: "Oracle", 3306: "MySQL", 3389: "RDP", 5900: "VNC", 8080: "HTTP-proxy"
+        }
+        self.protocol_colors = {
+            "TCP": QColor("#E8F8F5"),
+            "UDP": QColor("#FEF9E7"),
+            "ICMP": QColor("#F4ECF7"),
+            "ARP": QColor("#EBF5FB"),
+            "HTTP": QColor("#D5F5E3"),
+            "HTTPS": QColor("#D4E6F1"),
+            "DNS": QColor("#FDEDEC"),
+        }
 
         # --- NEW: Data Structures for Batching ---
         self.ping_results_data = {} # Still store final summary data {ip: data_dict}
@@ -1010,14 +1057,47 @@ class PingMonitorWindow(QMainWindow):
         
         capture_layout.addWidget(capture_controls_group)
 
+        # Add the filter bar
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filter:"))
+        self.capture_filter_input_live = QLineEdit()
+        self.capture_filter_input_live.setPlaceholderText("e.g., tcp or 8.8.8.8")
+        filter_layout.addWidget(self.capture_filter_input_live)
+        capture_layout.addLayout(filter_layout)
+
         # Capture Results
         capture_results_group = QGroupBox("Captured Packets")
         capture_results_layout = QVBoxLayout(capture_results_group)
-        self.capture_table = QTableWidget()
-        self.capture_table.setColumnCount(5)
-        self.capture_table.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
-        self.capture_table.horizontalHeader().setStretchLastSection(True)
-        capture_results_layout.addWidget(self.capture_table)
+
+        # Create the three-pane view
+        capture_splitter = QSplitter(Qt.Vertical)
+
+        self.capture_table = QTreeView()
+        self.capture_model = QStandardItemModel()
+        self.capture_model.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
+        self.capture_proxy_model = PacketCaptureProxyModel()
+        self.capture_proxy_model.setSourceModel(self.capture_model)
+        self.capture_proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.capture_table.setModel(self.capture_proxy_model)
+
+        self.capture_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.capture_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.capture_table.selectionModel().selectionChanged.connect(self._on_packet_selected)
+        self.capture_table.setSortingEnabled(True)
+        self.capture_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.capture_table.customContextMenuRequested.connect(self.show_capture_context_menu)
+        capture_splitter.addWidget(self.capture_table)
+
+        self.packet_dissection_tree = QTreeView()
+        self.packet_dissection_tree.setHeaderHidden(True)
+        capture_splitter.addWidget(self.packet_dissection_tree)
+
+        self.raw_bytes_text = QTextEdit()
+        self.raw_bytes_text.setReadOnly(True)
+        self.raw_bytes_text.setFont(QFont("Courier", 10))
+        capture_splitter.addWidget(self.raw_bytes_text)
+
+        capture_results_layout.addWidget(capture_splitter)
         capture_layout.addWidget(capture_results_group)
 
         self.tab_widget.addTab(capture_page_widget, "Capture")
@@ -1060,6 +1140,106 @@ class PingMonitorWindow(QMainWindow):
         self.start_dns_query_button.clicked.connect(self.start_dns_query)
         self.capture_start_stop_button.clicked.connect(self.toggle_capture)
         self.capture_save_button.clicked.connect(self.save_capture)
+        self.capture_filter_input_live.textChanged.connect(self.filter_capture_table)
+
+    def filter_capture_table(self, text):
+        self.capture_proxy_model.setFilterRegExp(text)
+
+    def get_brush_for_packet(self, packet):
+        if packet.haslayer(scapy.all.TCP):
+            if packet.haslayer(scapy.all.Raw):
+                if b"HTTP" in packet[scapy.all.Raw].load:
+                    return QBrush(self.protocol_colors["HTTP"])
+            if packet.haslayer(scapy.all.TLS):
+                return QBrush(self.protocol_colors["HTTPS"])
+            return QBrush(self.protocol_colors["TCP"])
+        elif packet.haslayer(scapy.all.UDP):
+            if packet.haslayer(scapy.all.DNS):
+                return QBrush(self.protocol_colors["DNS"])
+            return QBrush(self.protocol_colors["UDP"])
+        elif packet.haslayer(scapy.all.ICMP):
+            return QBrush(self.protocol_colors["ICMP"])
+        elif packet.haslayer(scapy.all.ARP):
+            return QBrush(self.protocol_colors["ARP"])
+        return QBrush(Qt.white)
+
+    def show_capture_context_menu(self, pos):
+        index = self.capture_table.indexAt(pos)
+        if not index.isValid():
+            return
+
+        menu = QMenu()
+        follow_stream_action = menu.addAction("Follow TCP/UDP Stream")
+        action = menu.exec_(self.capture_table.viewport().mapToGlobal(pos))
+
+        if action == follow_stream_action:
+            self.follow_stream()
+
+    def follow_stream(self):
+        selected_indexes = self.capture_table.selectionModel().selectedIndexes()
+        if not selected_indexes:
+            return
+
+        proxy_index = selected_indexes[0]
+        source_index = self.capture_proxy_model.mapToSource(proxy_index)
+        packet = self.capture_model.itemFromIndex(source_index).data(Qt.UserRole)
+
+        if not packet.haslayer(scapy.all.TCP) and not packet.haslayer(scapy.all.UDP):
+            QMessageBox.information(self, "Not a Stream", "Please select a TCP or UDP packet to follow.")
+            return
+
+        if packet.haslayer(scapy.all.IP):
+            src_ip = packet[scapy.all.IP].src
+            dst_ip = packet[scapy.all.IP].dst
+        else:
+            QMessageBox.information(self, "Not an IP Packet", "Cannot follow stream for non-IP packets.")
+            return
+        
+        if packet.haslayer(scapy.all.TCP):
+            src_port = packet[scapy.all.TCP].sport
+            dst_port = packet[scapy.all.TCP].dport
+            proto = "tcp"
+        elif packet.haslayer(scapy.all.UDP):
+            src_port = packet[scapy.all.UDP].sport
+            dst_port = packet[scapy.all.UDP].dport
+            proto = "udp"
+
+        stream_packets = []
+        for p in self.captured_packets:
+            if p.haslayer(scapy.all.IP) and (p.haslayer(scapy.all.TCP) or p.haslayer(scapy.all.UDP)):
+                p_src_ip = p[scapy.all.IP].src
+                p_dst_ip = p[scapy.all.IP].dst
+                p_proto = ""
+                if p.haslayer(scapy.all.TCP):
+                    p_src_port = p[scapy.all.TCP].sport
+                    p_dst_port = p[scapy.all.TCP].dport
+                    p_proto = "tcp"
+                elif p.haslayer(scapy.all.UDP):
+                    p_src_port = p[scapy.all.UDP].sport
+                    p_dst_port = p[scapy.all.UDP].dport
+                    p_proto = "udp"
+
+                if proto == p_proto and \
+                   ((src_ip == p_src_ip and dst_ip == p_dst_ip and src_port == p_src_port and dst_port == p_dst_port) or \
+                    (src_ip == p_dst_ip and dst_ip == p_src_ip and src_port == p_dst_port and dst_port == p_src_port)):
+                    stream_packets.append(p)
+
+        if proto == "tcp":
+            stream_packets.sort(key=lambda p: p[scapy.all.TCP].seq)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Follow Stream")
+        dialog.setMinimumSize(600, 400)
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+
+        for p in stream_packets:
+            if p.haslayer(scapy.all.Raw):
+                text_edit.append(p[scapy.all.Raw].load.decode('utf-8', 'ignore'))
+
+        dialog.exec_()
 
     def toggle_capture(self):
         if self.capture_thread and self.capture_thread.isRunning():
@@ -1067,7 +1247,8 @@ class PingMonitorWindow(QMainWindow):
             self.capture_start_stop_button.setText("Start Capture")
             self.capture_save_button.setEnabled(True)
         else:
-            self.capture_table.setRowCount(0)
+            self.capture_model.clear()
+            self.capture_model.setHorizontalHeaderLabels(["Time", "Source", "Destination", "Protocol", "Length"])
             self.captured_packets.clear()
             
             interface = self.capture_interface_combo.currentText()
@@ -1088,30 +1269,112 @@ class PingMonitorWindow(QMainWindow):
             self.capture_start_stop_button.setText("Stop Capture")
             self.capture_save_button.setEnabled(False)
 
+    def _on_packet_selected(self, selected, deselected):
+        selected_indexes = selected.indexes()
+        if not selected_indexes:
+            return
+
+        proxy_index = selected_indexes[0]
+        source_index = self.capture_proxy_model.mapToSource(proxy_index)
+        packet = self.capture_model.itemFromIndex(source_index).data(Qt.UserRole)
+
+        # Update dissection tree
+        model = QStandardItemModel()
+        self.packet_dissection_tree.setModel(model)
+        self.populate_dissection_tree(model, packet)
+
+        # Update raw bytes view
+        self.raw_bytes_text.setText(self.format_raw_bytes(packet))
+
+    def populate_dissection_tree(self, model, packet):
+        parent_item = model.invisibleRootItem()
+        if packet:
+            for layer in packet.layers():
+                layer_item = QStandardItem(layer.name)
+                parent_item.appendRow(layer_item)
+                for field_name, field_value in layer.fields.items():
+                    field_item = QStandardItem(f"{field_name}: {field_value}")
+                    layer_item.appendRow(field_item)
+
+    def format_raw_bytes(self, packet):
+        if not packet:
+            return ""
+        raw_bytes = bytes(packet)
+        hex_lines = []
+        ascii_lines = []
+        for i in range(0, len(raw_bytes), 16):
+            chunk = raw_bytes[i:i+16]
+            hex_lines.append(" ".join(f"{b:02x}" for b in chunk))
+            ascii_lines.append("".join(chr(b) if 32 <= b < 127 else "." for b in chunk))
+
+        formatted_lines = []
+        for i in range(len(hex_lines)):
+            formatted_lines.append(f"{hex_lines[i]:<48}  {ascii_lines[i]}")
+        return "\n".join(formatted_lines)
+
+    def resolve_ip(self, ip_address):
+        if ip_address not in self.dns_cache:
+            self.dns_cache[ip_address] = ip_address  # Placeholder
+            worker = ReverseDnsWorker(ip_address)
+            thread = QThread()
+            worker.moveToThread(thread)
+            worker.finished.connect(self.update_dns_cache)
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.start()
+
+    @Slot(str, str)
+    def update_dns_cache(self, ip_address, hostname):
+        self.dns_cache[ip_address] = hostname
+        for row in range(self.capture_model.rowCount()):
+            src_item = self.capture_model.item(row, 1)
+            if src_item and src_item.text() == ip_address:
+                src_item.setText(hostname)
+            dst_item = self.capture_model.item(row, 2)
+            if dst_item and dst_item.text() == ip_address:
+                dst_item.setText(hostname)
+
     def update_capture_table(self, packet):
         self.captured_packets.append(packet)
-        row_position = self.capture_table.rowCount()
-        self.capture_table.insertRow(row_position)
-
-        self.capture_table.setItem(row_position, 0, QTableWidgetItem(datetime.datetime.fromtimestamp(packet.time).strftime('%Y-%m-%d %H:%M:%S')))
+        
+        time_item = QStandardItem(datetime.datetime.fromtimestamp(packet.time).strftime('%Y-%m-%d %H:%M:%S'))
+        time_item.setData(packet, Qt.UserRole)
         
         src = packet[scapy.all.IP].src if packet.haslayer(scapy.all.IP) else "N/A"
         dst = packet[scapy.all.IP].dst if packet.haslayer(scapy.all.IP) else "N/A"
         
+        self.resolve_ip(src)
+        self.resolve_ip(dst)
+
+        src_display = self.dns_cache.get(src, src)
+        dst_display = self.dns_cache.get(dst, dst)
+
         proto = "N/A"
         if packet.haslayer(scapy.all.TCP):
-            proto = "TCP"
+            sport = packet[scapy.all.TCP].sport
+            dport = packet[scapy.all.TCP].dport
+            proto = self.port_to_service.get(sport, self.port_to_service.get(dport, "TCP"))
         elif packet.haslayer(scapy.all.UDP):
-            proto = "UDP"
+            sport = packet[scapy.all.UDP].sport
+            dport = packet[scapy.all.UDP].dport
+            proto = self.port_to_service.get(sport, self.port_to_service.get(dport, "UDP"))
         elif packet.haslayer(scapy.all.ICMP):
             proto = "ICMP"
         
         length = len(packet)
 
-        self.capture_table.setItem(row_position, 1, QTableWidgetItem(src))
-        self.capture_table.setItem(row_position, 2, QTableWidgetItem(dst))
-        self.capture_table.setItem(row_position, 3, QTableWidgetItem(proto))
-        self.capture_table.setItem(row_position, 4, QTableWidgetItem(str(length)))
+        brush = self.get_brush_for_packet(packet)
+        row = [
+            time_item,
+            QStandardItem(src_display),
+            QStandardItem(dst_display),
+            QStandardItem(proto),
+            QStandardItem(str(length))
+        ]
+        for item in row:
+            item.setBackground(brush)
+        self.capture_model.appendRow(row)
 
     def save_capture(self):
         if not self.captured_packets:
