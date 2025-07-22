@@ -16,16 +16,18 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
     QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
-    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView
+    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView, QListWidget, QSystemTrayIcon
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
-    QPropertyAnimation, QEasingCurve,
+    QPropertyAnimation, QEasingCurve, QPoint,
     pyqtProperty as Property # Use pyqtProperty
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIcon
 from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFilterProxyModel, QEvent
+from PyQt5.QtMultimedia import QSoundEffect
+from PyQt5.QtCore import QUrl
 import pyqtgraph as pg
 from sympy import true
 import numpy as np
@@ -673,6 +675,58 @@ class PortScanWorker(QObject):
             self.ports_scanned.emit(self.ip_address, "None")
         self.finished.emit(self.ip_address)
 
+# --- Alert Manager ---
+class AlertManager(QObject):
+    alert_triggered = Signal(str, str) # ip, rule_string
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rules = []
+        self.ip_states = defaultdict(lambda: defaultdict(lambda: deque(maxlen=60))) # ip -> metric -> deque of (timestamp, value)
+
+    def add_rule(self, metric, operator, value, duration):
+        rule = {"metric": metric, "operator": operator, "value": value, "duration": duration}
+        self.rules.append(rule)
+        return f"If {metric} {operator} {value} for {duration}s"
+
+    def check_alerts(self, ip, data):
+        if "timeouts" in data:
+            self.ip_states[ip]["Timeouts"].append((time.time(), data["timeouts"]))
+        if "total_pings" in data and data["total_pings"] > 0:
+            packet_loss = (data.get("timeouts", 0) / data["total_pings"]) * 100
+            self.ip_states[ip]["Packet Loss %"].append((time.time(), packet_loss))
+        if "timeouts" in data:
+            self.ip_states[ip]["Packet Lost"].append((time.time(), data["timeouts"]))
+
+        for rule in self.rules:
+            self._check_rule_for_ip(ip, rule)
+
+    def _check_rule_for_ip(self, ip, rule):
+        metric = rule["metric"]
+        op = rule["operator"]
+        value = rule["value"]
+        duration = rule["duration"]
+
+        history = self.ip_states[ip][metric]
+        
+        # Get relevant data points within the duration
+        now = time.time()
+        relevant_points = [p[1] for p in history if now - p[0] <= duration]
+
+        if not relevant_points:
+            return
+
+        # Check if all relevant points meet the condition
+        all_met = True
+        for point in relevant_points:
+            if op == '>':
+                if not point > value:
+                    all_met = False
+                    break
+        
+        if all_met and len(relevant_points) >= duration: # Ensure enough data
+            self.alert_triggered.emit(ip, f"Rule matched: {metric} {op} {value} for {duration}s")
+
 # --- Animated Label Widget (No changes needed) ---
 class AnimatedLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -686,6 +740,53 @@ class AnimatedLabel(QLabel):
             self._background_color = color
             self.setStyleSheet(f"background-color: rgba({color.red()},{color.green()},{color.blue()},{color.alpha()}); padding: 6px; border: 1px solid #B0B0B0; border-radius: 3px;")
     backgroundColor = Property(QColor, getBackgroundColor, setBackgroundColor)
+
+class AlertManager(QObject):
+    alert_triggered = Signal(str, str) # ip, rule_string
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rules = []
+        self.ip_states = defaultdict(lambda: defaultdict(lambda: deque(maxlen=60))) # ip -> metric -> deque of (timestamp, value)
+
+    def add_rule(self, metric, operator, value, duration):
+        rule = {"metric": metric, "operator": operator, "value": value, "duration": duration}
+        self.rules.append(rule)
+        return f"If {metric} {operator} {value} for {duration}s"
+
+    def check_alerts(self, ip, data):
+        if "total_pings" in data and data["total_pings"] > 0:
+            packet_loss = (data.get("timeouts", 0) / data["total_pings"]) * 100
+            self.ip_states[ip]["Packet Loss %"].append((time.time(), packet_loss))
+
+        for rule in self.rules:
+            self._check_rule_for_ip(ip, rule)
+
+    def _check_rule_for_ip(self, ip, rule):
+        metric = rule["metric"]
+        op = rule["operator"]
+        value = rule["value"]
+        duration = rule["duration"]
+
+        history = self.ip_states[ip][metric]
+        
+        # Get relevant data points within the duration
+        now = time.time()
+        relevant_points = [p[1] for p in history if now - p[0] <= duration]
+
+        if not relevant_points:
+            return
+
+        # Check if all relevant points meet the condition
+        all_met = True
+        for point in relevant_points:
+            if op == '>':
+                if not point > value:
+                    all_met = False
+                    break
+        
+        if all_met and len(relevant_points) >= duration: # Ensure enough data
+            self.alert_triggered.emit(ip, f"Rule matched: {metric} {op} {value} for {duration}s")
 
 class PingMonitorWindow(QMainWindow):
     request_stop_signal = Signal()
@@ -773,6 +874,9 @@ class PingMonitorWindow(QMainWindow):
         # --- API Fetching ---
         self.api_fetch_thread = None
         self.api_fetch_worker = None
+
+        # --- Alert Manager ---
+        self.alert_manager = AlertManager(self)
 
         # --- UI Initialization ---
         self._init_ui()
@@ -939,16 +1043,15 @@ class PingMonitorWindow(QMainWindow):
         self.select_ips_button.setCheckable(True)
         self.select_ips_button.setEnabled(False)
         
-        button_grid_layout.addWidget(self.save_button, 0, 0)
-        button_grid_layout.addWidget(self.save_filtered_button, 0, 1)
-        button_grid_layout.addWidget(self.save_selected_button, 0, 2)
-        button_grid_layout.addWidget(self.scan_ports_button, 1, 0)
-        button_grid_layout.addWidget(self.traceroute_button, 1, 1)
-        button_grid_layout.addWidget(self.show_graph_button, 1, 2)
-        button_grid_layout.addWidget(self.select_ips_button, 2, 0, 1, 3)
+        self.save_logs_button = QPushButton("Save Logs...")
+        button_grid_layout.addWidget(self.save_logs_button, 0, 0, 1, 3)
+        button_grid_layout.addWidget(self.select_ips_button, 1, 0, 1, 3)
         sidebar_layout.addLayout(button_grid_layout)
 
-        sidebar_layout.addStretch(1) # Pushes buttons to the bottom
+        sidebar_layout.addStretch(1)
+
+        self.manage_alerts_button = QPushButton("Manage Alerts...")
+        sidebar_layout.addWidget(self.manage_alerts_button)
 
         # Primary Action Buttons
         self.start_button = QPushButton("Start Monitoring")
@@ -978,6 +1081,7 @@ class PingMonitorWindow(QMainWindow):
         self.results_view.setSelectionMode(QTreeView.ExtendedSelection)
         self.results_view.setSelectionBehavior(QTreeView.SelectRows)
         self.results_view.setSortingEnabled(True)
+        self.results_view.setContextMenuPolicy(Qt.CustomContextMenu)
         header = self.results_view.header()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(COL_IP, QHeaderView.Stretch)
@@ -1274,9 +1378,7 @@ class PingMonitorWindow(QMainWindow):
     def _connect_signals(self):
         self.start_button.clicked.connect(self.start_monitoring)
         self.stop_button.clicked.connect(self._initiate_stop)
-        self.save_button.clicked.connect(lambda: self.save_log(filter_type="all"))
-        self.save_filtered_button.clicked.connect(lambda: self.save_log(filter_type="timeout"))
-        self.save_selected_button.clicked.connect(lambda: self.save_log(filter_type="selected"))
+        self.save_logs_button.clicked.connect(self.show_save_log_menu)
         self.request_stop_signal.connect(self._initiate_stop) # For potential future use
         self.fetch_api_button.clicked.connect(self.fetch_ips_from_api)
         self.add_range_button.clicked.connect(self.add_ip_range)
@@ -1285,10 +1387,8 @@ class PingMonitorWindow(QMainWindow):
         self.ip_text_edit.textChanged.connect(self._update_ip_count_label)
         self.results_view.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.results_view.clicked.connect(self.on_row_clicked)
+        self.results_view.customContextMenuRequested.connect(self.show_results_context_menu)
         self.reset_button.clicked.connect(self.reset_application)
-        self.scan_ports_button.clicked.connect(self.start_port_scan)
-        self.traceroute_button.clicked.connect(self.start_traceroute)
-        self.show_graph_button.clicked.connect(self._open_graph_window)
         self.start_scan_button.clicked.connect(self.handle_scan_request)
         self.stop_scan_button.clicked.connect(self.stop_scan)
         self.start_dns_query_button.clicked.connect(self.start_dns_query)
@@ -1298,6 +1398,44 @@ class PingMonitorWindow(QMainWindow):
         self.capture_filter_input_live.textChanged.connect(self.filter_capture_table)
         self.ip_scan_start_button.clicked.connect(self.start_ip_scan)
         self.ip_scan_stop_button.clicked.connect(self.stop_ip_scan)
+        self.save_logs_button.clicked.connect(self.show_save_log_menu)
+        self.results_view.customContextMenuRequested.connect(self.show_results_context_menu)
+        self.manage_alerts_button.clicked.connect(self.open_alert_dialog)
+        self.alert_manager.alert_triggered.connect(self.handle_alert)
+
+    def show_save_log_menu(self):
+        menu = QMenu(self)
+        all_action = menu.addAction("Save All Logs")
+        timeout_action = menu.addAction("Save Timeout Logs")
+        selected_action = menu.addAction("Save Selected Logs")
+        
+        action = menu.exec_(self.save_logs_button.mapToGlobal(QPoint(0, self.save_logs_button.height())))
+
+        if action == all_action:
+            self.save_log(filter_type="all")
+        elif action == timeout_action:
+            self.save_log(filter_type="timeout")
+        elif action == selected_action:
+            self.save_log(filter_type="selected")
+
+    def show_results_context_menu(self, pos):
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            return
+
+        menu = QMenu()
+        scan_ports_action = menu.addAction("Scan Ports")
+        traceroute_action = menu.addAction("Traceroute")
+        show_graph_action = menu.addAction("Show Graph")
+        
+        action = menu.exec_(self.results_view.viewport().mapToGlobal(pos))
+
+        if action == scan_ports_action:
+            self.start_port_scan()
+        elif action == traceroute_action:
+            self.start_traceroute()
+        elif action == show_graph_action:
+            self._open_graph_window()
 
     def get_brush_for_packet(self, packet):
         if packet.haslayer(scapy.all.TCP):
@@ -2513,6 +2651,40 @@ class PingMonitorWindow(QMainWindow):
         self.worker_threads.clear()
         self.active_workers_count = 0
 
+    def show_save_log_menu(self):
+        menu = QMenu(self)
+        all_action = menu.addAction("Save All Logs")
+        timeout_action = menu.addAction("Save Timeout Logs")
+        selected_action = menu.addAction("Save Selected Logs")
+        
+        action = menu.exec_(self.save_logs_button.mapToGlobal(QPoint(0, self.save_logs_button.height())))
+
+        if action == all_action:
+            self.save_log(filter_type="all")
+        elif action == timeout_action:
+            self.save_log(filter_type="timeout")
+        elif action == selected_action:
+            self.save_log(filter_type="selected")
+
+    def show_results_context_menu(self, pos):
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            return
+
+        menu = QMenu()
+        scan_ports_action = menu.addAction("Scan Ports")
+        traceroute_action = menu.addAction("Traceroute")
+        show_graph_action = menu.addAction("Show Graph")
+        
+        action = menu.exec_(self.results_view.viewport().mapToGlobal(pos))
+
+        if action == scan_ports_action:
+            self.start_port_scan()
+        elif action == traceroute_action:
+            self.start_traceroute()
+        elif action == show_graph_action:
+            self._open_graph_window()
+
     @Slot()
     def save_log(self, filter_type="all"):
         if self.monitoring_active or self.stopping_initiated:
@@ -2849,6 +3021,114 @@ class PingMonitorWindow(QMainWindow):
         if total > 0:
             progress = int((current / total) * 100)
             self.progress_bar.setValue(progress)
+
+    def open_alert_dialog(self):
+        dialog = AlertsConfigurationDialog(self.alert_manager, self)
+        dialog.exec_()
+
+    def handle_alert(self, ip, rule_string):
+        self.log_event(f"ALERT for {ip}: {rule_string}", "critical")
+        self.tray_icon.showMessage("Ping Alert", f"Host: {ip}\n{rule_string}", QSystemTrayIcon.Warning, 5000)
+        self.alert_sound.play()
+
+class AlertsConfigurationDialog(QDialog):
+    def __init__(self, alert_manager, parent=None):
+        super().__init__(parent)
+        self.alert_manager = alert_manager
+        self.setWindowTitle("Alerts Configuration")
+        self.setMinimumSize(400, 300)
+
+        layout = QVBoxLayout(self)
+
+        self.rules_list = QListWidget()
+        for rule in self.alert_manager.rules:
+            self.rules_list.addItem(f"If {rule['metric']} {rule['operator']} {rule['value']} for {rule['duration']}s")
+        layout.addWidget(self.rules_list)
+
+        rule_config_layout = QGridLayout()
+        self.metric_combo = QComboBox()
+        self.metric_combo.addItems(["Timeouts", "Packet Loss %", "Packet Lost"])
+        self.operator_combo = QComboBox()
+        self.operator_combo.addItems([">"])
+        self.value_input = QLineEdit()
+        self.value_input.setPlaceholderText("Value (e.g., 5)")
+        self.duration_input = QLineEdit()
+        self.duration_input.setPlaceholderText("Duration (sec, e.g., 60)")
+
+        rule_config_layout.addWidget(QLabel("If:"), 0, 0)
+        rule_config_layout.addWidget(self.metric_combo, 0, 1)
+        rule_config_layout.addWidget(self.operator_combo, 0, 2)
+        rule_config_layout.addWidget(self.value_input, 0, 3)
+        rule_config_layout.addWidget(QLabel("for"), 0, 4)
+        rule_config_layout.addWidget(self.duration_input, 0, 5)
+        
+        layout.addLayout(rule_config_layout)
+
+        button_layout = QHBoxLayout()
+        self.add_rule_button = QPushButton("Add Rule")
+        self.remove_rule_button = QPushButton("Remove Selected Rule")
+        button_layout.addWidget(self.add_rule_button)
+        button_layout.addWidget(self.remove_rule_button)
+        layout.addLayout(button_layout)
+
+        self.add_rule_button.clicked.connect(self.add_rule)
+        self.remove_rule_button.clicked.connect(self.remove_rule)
+
+    def add_rule(self):
+        metric = self.metric_combo.currentText()
+        operator = self.operator_combo.currentText()
+        try:
+            value = float(self.value_input.text())
+            duration = int(self.duration_input.text())
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers for value and duration.")
+            return
+
+        rule_string = self.alert_manager.add_rule(metric, operator, value, duration)
+        self.rules_list.addItem(rule_string)
+
+    def remove_rule(self):
+        selected_items = self.rules_list.selectedItems()
+        if not selected_items:
+            return
+        for item in selected_items:
+            row = self.rules_list.row(item)
+            self.rules_list.takeItem(row)
+            del self.alert_manager.rules[row]
+
+    def show_save_log_menu(self):
+        menu = QMenu(self)
+        all_action = menu.addAction("Save All Logs")
+        timeout_action = menu.addAction("Save Timeout Logs")
+        selected_action = menu.addAction("Save Selected Logs")
+        
+        action = menu.exec_(self.save_logs_button.mapToGlobal(QPoint(0, self.save_logs_button.height())))
+
+        if action == all_action:
+            self.save_log(filter_type="all")
+        elif action == timeout_action:
+            self.save_log(filter_type="timeout")
+        elif action == selected_action:
+            self.save_log(filter_type="selected")
+
+    def show_results_context_menu(self, pos):
+        selected_indexes = self.results_view.selectionModel().selectedRows()
+        if not selected_indexes:
+            return
+
+        menu = QMenu()
+        scan_ports_action = menu.addAction("Scan Ports")
+        traceroute_action = menu.addAction("Traceroute")
+        show_graph_action = menu.addAction("Show Graph")
+        
+        action = menu.exec_(self.results_view.viewport().mapToGlobal(pos))
+
+        if action == scan_ports_action:
+            self.start_port_scan()
+        elif action == traceroute_action:
+            self.start_traceroute()
+        elif action == show_graph_action:
+            self._open_graph_window()
 
 class GraphWindow(QMainWindow):
     def __init__(self, ip_addresses, parent=None):
