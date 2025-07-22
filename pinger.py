@@ -10,6 +10,7 @@ import ctypes
 import os
 import json
 import requests
+import socket
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -22,9 +23,9 @@ from PyQt5.QtCore import (
     pyqtProperty as Property # Use pyqtProperty
 )
 from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIcon
-from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer
+from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFilterProxyModel
 # --- Configuration ---
-MAX_IPS = 1500 # Increased limit
+MAX_IPS = 1000 # Increased limit
 PING_TIMEOUT_SEC = 2
 PING_INTERVAL_SEC = 1
 ICON_FILENAME = "app_icon.ico"
@@ -57,7 +58,8 @@ COL_UNKNOWN = 5
 COL_PERM = 6
 COL_OTHER = 7
 COL_TOTAL = 8
-NUM_COLUMNS = 9 # Total number of columns
+COL_PORTS = 9
+NUM_COLUMNS = 10 # Total number of columns
 
 class PingDataModel(QAbstractItemModel):
     """ Custom model to hold and manage ping data for QTreeView. """
@@ -138,6 +140,7 @@ class PingDataModel(QAbstractItemModel):
             if col == COL_PERM: return str(item_data.get('permission_error', 0))
             if col == COL_OTHER: return str(item_data.get('other_errors', 0))
             if col == COL_TOTAL: return str(item_data.get('total_pings', 0))
+            if col == COL_PORTS: return item_data.get('ports', '')
             return None # Use QVariant()
 
         # --- Coloring Roles ---
@@ -463,6 +466,61 @@ class PingWorker(QObject):
         # Emit final status directly to the GUI item one last time
         self.final_status_update.emit(self.ip_address, final_status_text, final_status_level)
         self.finished.emit(self.ip_address)
+# --- Custom Sort Proxy Model ---
+class SortFilterProxyModel(QSortFilterProxyModel):
+    """ A proxy model to enable custom sorting, especially for IP addresses. """
+    def lessThan(self, left, right):
+        """ Custom sorting logic. """
+        # Get the source model so we can access our custom data
+        source_model = self.sourceModel()
+        if not source_model:
+            return super().lessThan(left, right)
+
+        # Check if we are sorting the IP address column
+        if left.column() == COL_IP and right.column() == COL_IP:
+            # Get the IP strings from the source model
+            left_ip_str = source_model.data(left, Qt.DisplayRole)
+            right_ip_str = source_model.data(right, Qt.DisplayRole)
+
+            try:
+                # Convert IPs to ipaddress objects for correct comparison
+                left_ip_obj = ipaddress.ip_address(left_ip_str)
+                right_ip_obj = ipaddress.ip_address(right_ip_str)
+                return left_ip_obj < right_ip_obj
+            except ValueError:
+                # If conversion fails (e.g., for a hostname), fall back to string comparison
+                return left_ip_str < right_ip_str
+
+        # For all other columns, use the default sorting behavior
+        return super().lessThan(left, right)
+
+# --- Port Scan Worker ---
+class PortScanWorker(QObject):
+    ports_scanned = Signal(str, str)
+    finished = Signal(str)
+
+    def __init__(self, ip_address):
+        super().__init__()
+        self.ip_address = ip_address
+        self.ports_to_scan = [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
+
+    @Slot()
+    def run(self):
+        open_ports = []
+        for port in self.ports_to_scan:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            result = sock.connect_ex((self.ip_address, port))
+            if result == 0:
+                open_ports.append(str(port))
+            sock.close()
+        
+        if open_ports:
+            self.ports_scanned.emit(self.ip_address, ", ".join(open_ports))
+        else:
+            self.ports_scanned.emit(self.ip_address, "None")
+        self.finished.emit(self.ip_address)
+
 # --- Animated Label Widget (No changes needed) ---
 class AnimatedLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -492,9 +550,13 @@ class PingMonitorWindow(QMainWindow):
         if os.path.exists(icon_path): self.setWindowIcon(QIcon(icon_path))
         else: print(f"Warning: Icon file not found at '{icon_path}'")
 
-        self.headers = ["IP Address", "Status", "Success", "Timeouts", "Unreach.", "Unknown", "Perm. Denied", "Other", "Total Pings"]
+        self.headers = ["IP Address", "Status", "Success", "Timeouts", "Unreach.", "Unknown", "Perm. Denied", "Other", "Total Pings", "Open Ports"]
         # === CHANGE: Instantiate the custom model ===
         self.ping_model = PingDataModel(self.headers)
+
+        # --- NEW: Setup the proxy model for sorting ---
+        self.proxy_model = SortFilterProxyModel()
+        self.proxy_model.setSourceModel(self.ping_model)
 
 
         # --- State Variables ---
@@ -504,6 +566,7 @@ class PingMonitorWindow(QMainWindow):
         self.start_time = 0; self.end_time = 0; self.duration_min = 0
         self.current_payload_size = 32; self.active_workers_count = 0
         self.worker_threads = {} # {ip: (QThread, PingWorker)}
+        self.port_scan_threads = {} # {ip: (QThread, PortScanWorker)}
         self.stop_event = threading.Event()
 
         # --- NEW: Data Structures for Batching ---
@@ -651,10 +714,12 @@ class PingMonitorWindow(QMainWindow):
         self.save_button = QPushButton("Save All Logs"); self.save_button.setEnabled(False)
         self.save_filtered_button = QPushButton("Save Timeout Logs"); self.save_filtered_button.setEnabled(False)
         self.save_selected_button = QPushButton("Save Selected Logs"); self.save_selected_button.setEnabled(False)
+        self.scan_ports_button = QPushButton("Scan Ports"); self.scan_ports_button.setEnabled(False)
         self.select_ips_button = QPushButton("Select IPs"); self.select_ips_button.setCheckable(True); self.select_ips_button.setEnabled(False)
         control_layout.addWidget(self.start_button); control_layout.addWidget(self.stop_button); control_layout.addWidget(self.save_button)
         control_layout.addWidget(self.save_filtered_button)
         control_layout.addWidget(self.save_selected_button)
+        control_layout.addWidget(self.scan_ports_button)
         control_layout.addStretch(1)
         control_layout.addWidget(self.select_ips_button)
         control_layout.addWidget(self.reset_button)
@@ -672,7 +737,7 @@ class PingMonitorWindow(QMainWindow):
         results_group = QGroupBox("Monitoring Results")
         results_layout = QVBoxLayout(results_group)
         self.results_view = QTreeView() # Create the view
-        self.results_view.setModel(self.ping_model) # Set the custom model
+        self.results_view.setModel(self.proxy_model) # Set the proxy model
         self.results_view.setAlternatingRowColors(True)
         self.results_view.setUniformRowHeights(True) # Good for performance
         self.results_view.setSelectionMode(QTreeView.ExtendedSelection)
@@ -732,6 +797,7 @@ class PingMonitorWindow(QMainWindow):
         self.results_view.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.results_view.clicked.connect(self.on_row_clicked)
         self.reset_button.clicked.connect(self.reset_application)
+        self.scan_ports_button.clicked.connect(self.start_port_scan)
 
     @Slot()
     def reset_application(self):
@@ -980,7 +1046,7 @@ class PingMonitorWindow(QMainWindow):
         else:
             # Green when inactive but enabled
             self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
-        self.ping_model.layoutChanged.emit()
+        self.proxy_model.layoutChanged.emit()
 
     def on_selection_changed(self, selected, deselected):
         # This method is linked to the selection model, which can be complex.
@@ -995,7 +1061,8 @@ class PingMonitorWindow(QMainWindow):
         if not self.ping_model.selection_mode or not index.isValid():
             return
 
-        ip_index = self.ping_model.index(index.row(), COL_IP)
+        source_index = self.proxy_model.mapToSource(index)
+        ip_index = self.ping_model.index(source_index.row(), COL_IP)
         current_state = self.ping_model.data(ip_index, Qt.CheckStateRole)
         new_state = Qt.Checked if current_state == Qt.Unchecked else Qt.Unchecked
         self.ping_model.setData(ip_index, new_state, Qt.CheckStateRole)
@@ -1009,7 +1076,7 @@ class PingMonitorWindow(QMainWindow):
         # A better long-term solution might involve a custom selection model,
         # but this is a targeted fix for the reported bug.
         selection_model = self.results_view.selectionModel()
-        
+
         # This is a simplified way to ensure the clicked row remains 'selected'
         # visually without clearing other selections. It leverages the check state
         # as the source of truth, rather than the view's visual selection.
@@ -1143,6 +1210,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_button.setEnabled(False)
         self.save_filtered_button.setEnabled(False)
         self.save_selected_button.setEnabled(False)
+        self.scan_ports_button.setEnabled(False)
         self.select_ips_button.setEnabled(False)
         self.ip_text_edit.setEnabled(False); self.duration_input.setEnabled(False); self.payload_size_input.setEnabled(False)
         self.api_ip_input.setEnabled(False); self.api_port_input.setEnabled(False); self.fetch_api_button.setEnabled(False)
@@ -1372,6 +1440,7 @@ class PingMonitorWindow(QMainWindow):
         self.save_selected_button.setEnabled(True)
         self.select_ips_button.setEnabled(True)
         self.select_ips_button.setStyleSheet("background-color: #2ECC71; color: white;")
+        self.scan_ports_button.setEnabled(True)
         self.ip_text_edit.setEnabled(True); self.duration_input.setEnabled(True); self.payload_size_input.setEnabled(True)
         self.api_ip_input.setEnabled(True); self.api_port_input.setEnabled(True); self.fetch_api_button.setEnabled(True)
         self.add_range_button.setEnabled(True)
@@ -1513,6 +1582,52 @@ class PingMonitorWindow(QMainWindow):
             self._log_event_gui(f"Unexpected error saving log: {e}", "critical")
             QMessageBox.critical(self, "Save Error", f"An unexpected error occurred during saving:\n{e}")
 
+
+    @Slot()
+    def start_port_scan(self):
+        if self.monitoring_active:
+            QMessageBox.warning(self, "Action Not Allowed", "Cannot start port scan while monitoring is active.")
+            return
+
+        selected_ips = list(self.ping_model._checked_ips)
+        if not selected_ips:
+            QMessageBox.information(self, "No Selection", "Please check the boxes next to the IPs you want to scan.")
+            return
+
+        self.scan_ports_button.setEnabled(False)
+        self.update_status(f"Scanning ports on {len(selected_ips)} IPs...", "running")
+        self._log_event_gui(f"Starting port scan for {len(selected_ips)} selected IPs.", "info")
+
+        for ip in selected_ips:
+            thread = QThread(self)
+            worker = PortScanWorker(ip)
+            worker.moveToThread(thread)
+
+            worker.ports_scanned.connect(self._update_port_scan_result)
+            worker.finished.connect(self._port_scan_worker_finished)
+
+            thread.started.connect(worker.run)
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+
+            self.port_scan_threads[ip] = (thread, worker)
+            thread.start()
+
+    @Slot(str, str)
+    def _update_port_scan_result(self, ip, open_ports):
+        update_data = {ip: {'ports': open_ports}}
+        self.ping_model.update_data(update_data)
+        if ip in self.ping_results_data:
+            self.ping_results_data[ip]['ports'] = open_ports
+
+    @Slot(str)
+    def _port_scan_worker_finished(self, ip):
+        self.port_scan_threads.pop(ip, None)
+        if not self.port_scan_threads:
+            self.update_status("Port scan finished.", "finished")
+            self._log_event_gui("Port scan complete.", "info")
+            self.scan_ports_button.setEnabled(True)
 
     def closeEvent(self, event):
         """ Handles the window close event more robustly. """
