@@ -14,7 +14,7 @@ import requests
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
-    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView
+    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter
 )
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
