@@ -26,6 +26,7 @@ from PyQt5.QtGui import QColor, QBrush, QFont, QTextCursor, QTextCharFormat, QIc
 from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFilterProxyModel
 import pyqtgraph as pg
 from sympy import true
+import numpy as np
 
 # --- Configuration ---
 MAX_IPS = 1000 # Increased limit
@@ -375,6 +376,7 @@ class PingWorker(QObject):
                     self.ping_data["ping_time"] = rtt
                 else:
                     status_key = "timeouts"; status_level = "warning"; message = "Timeout"
+                    self.ping_data["ping_time"] = None # <-- ADD THIS!
 
             # --- Handle Exceptions ---
             except icmplib.exceptions.SocketPermissionError as e:
@@ -382,9 +384,11 @@ class PingWorker(QObject):
                 if not permission_error_logged:
                     self.log_critical_event.emit(f"[CRITICAL] {self.ip_address}: {message}. Run as Admin/root! Stopping pings.", "critical")
                     permission_error_logged = True; significant_event = True
+                self.ping_data["ping_time"] = None
             except icmplib.exceptions.NameLookupError as e:
                 status_key = "unknown_host"; status_level = "critical"; message = "Unknown Host"
                 self.log_critical_event.emit(f"[CRITICAL] {self.ip_address}: {message}. Stopping pings.", "critical"); significant_event = True;
+                self.ping_data["ping_time"] = None
                 break # Stop worker loop
             except icmplib.exceptions.DestinationUnreachable as e:
                  print(f">>> Worker {self.ip_address}: Caught DestinationUnreachable")
@@ -392,11 +396,14 @@ class PingWorker(QObject):
                  if self.ping_data.get(status_key, 0) < 3: # Log first few directly
                     self.log_critical_event.emit(f"[UNREACHABLE] {self.ip_address}: {e}", "error")
                     significant_event = True # Treat early unreachables as significant for emit check
+                 self.ping_data["ping_time"] = None
             except icmplib.exceptions.TimeoutExceeded as e:
                  status_key = "timeouts"; status_level = "warning"; message = "Timeout (Ex)"
+                 self.ping_data["ping_time"] = None
             except icmplib.exceptions.ICMPLibError as e: # Catch other library-specific errors
                  status_key = "other_errors"; status_level = "error"; message = f"ICMP Error"
                  self.log_critical_event.emit(f"[ERROR] {self.ip_address}: {message} - {e}", "error"); significant_event = True
+                 self.ping_data["ping_time"] = None
             except OSError as e: # Catch OS-level Socket Errors
                  if hasattr(e, 'winerror') and e.winerror == 10040: # WSAEMSGSIZE on Windows
                       status_key = "other_errors"; status_level = "critical"; message = "Payload Too Large"
@@ -410,10 +417,12 @@ class PingWorker(QObject):
                  else:
                      status_key = "other_errors"; status_level = "error"; message = f"OS Error"
                      self.log_critical_event.emit(f"[ERROR] {self.ip_address}: OS Error: {message} - {e}", "error"); significant_event = True
+                 self.ping_data["ping_time"] = None
             except Exception as e: # Catch any other unexpected errors
                  status_key = "other_errors"; status_level = "critical"; message = f"Unexpected Error"
                  self.log_critical_event.emit(f"[CRITICAL] {self.ip_address}: {message} - {e}", "critical")
                  permission_error_logged = True; significant_event = True # Stop pinging on unexpected errors too
+                 self.ping_data["ping_time"] = None
 
             # --- Update Local Aggregated Data ---
             self.ping_data[status_key] += 1
@@ -1814,24 +1823,79 @@ class GraphWindow(QMainWindow):
         self.setWindowTitle(f"Ping Graph for {self.ip_address}")
         self.setMinimumSize(800, 400)
 
+        # In GraphWindow.__init__
+        # Create a layout to hold the graph and the stats
+        layout = QVBoxLayout()
+        self.stats_label = QLabel("Avg: -- ms | Jitter: -- ms | Packet Loss: --%")
+        self.stats_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.stats_label)
         self.graph_widget = pg.PlotWidget()
-        self.setCentralWidget(self.graph_widget)
+        layout.addWidget(self.graph_widget)
+
+        central_widget = QWidget()
+        central_widget.setLayout(layout)
+        self.setCentralWidget(central_widget)
 
         self.graph_widget.setBackground('w')
         self.graph_widget.setLabel('left', 'Ping Time (ms)', color='black', size=30)
         self.graph_widget.setLabel('bottom', 'Time', color='black', size=30)
         self.graph_widget.showGrid(x=True, y=True)
+
+        # Add these lines after creating the graph_widget
+        self.graph_widget.addItem(pg.InfiniteLine(pos=100, angle=0, movable=False, pen=pg.mkPen('y', style=Qt.DotLine)))
+        self.graph_widget.addItem(pg.InfiniteLine(pos=250, angle=0, movable=False, pen=pg.mkPen('r', style=Qt.DotLine)))
+
+        # Add a label to explain them
+        self.graph_widget.getPlotItem().addLegend().addItem(pg.PlotDataItem(pen='g'), 'Good (<100ms)')
+        self.graph_widget.getPlotItem().addLegend().addItem(pg.PlotDataItem(pen='y'), 'Warning (100-250ms)')
+        self.graph_widget.getPlotItem().addLegend().addItem(pg.PlotDataItem(pen='r'), 'Poor (>250ms)')
         
         self.ping_times = deque(maxlen=100)
         self.time_stamps = deque(maxlen=100)
+        # In GraphWindow class, add a new list to store only valid ping times
+        self.valid_ping_times = deque(maxlen=100)
+        self.total_packets = 0
+        self.lost_packets = 0
 
-        pen = pg.mkPen(color=(255, 0, 0), width=2)
-        self.data_line = self.graph_widget.plot(list(self.time_stamps), list(self.ping_times), pen=pen)
+        self.scatter = pg.ScatterPlotItem(size=5, pen=pg.mkPen(None))
+        self.graph_widget.addItem(self.scatter)
+
+    def get_brush_for_ping(self, ping):
+        if ping is None or np.isnan(ping):
+            return pg.mkBrush(None) # Invisible for timeouts
+        if ping < 100:
+            return pg.mkBrush('g')
+        elif ping < 250:
+            return pg.mkBrush('y')
+        else:
+            return pg.mkBrush('r')
 
     def update_graph(self, ping_time):
-        self.ping_times.append(ping_time)
+        self.total_packets += 1
+        if ping_time is not None:
+            self.ping_times.append(ping_time)
+            self.valid_ping_times.append(ping_time)
+        else:
+            self.ping_times.append(float('nan')) # Use NaN for gaps
+            self.lost_packets += 1
+            
         self.time_stamps.append(time.time())
-        self.data_line.setData(list(self.time_stamps), list(self.ping_times))
+        points = [{'pos': (t, p), 'brush': self.get_brush_for_ping(p)} for t, p in zip(self.time_stamps, self.ping_times)]
+        self.scatter.setData(points)
+
+        # --- Calculate and Display Stats ---
+        if self.valid_ping_times:
+            avg_rtt = sum(self.valid_ping_times) / len(self.valid_ping_times)
+            # Jitter is the standard deviation
+            sum_sq_diff = sum((x - avg_rtt) ** 2 for x in self.valid_ping_times)
+            jitter = (sum_sq_diff / len(self.valid_ping_times)) ** 0.5
+        else:
+            avg_rtt = 0
+            jitter = 0
+            
+        packet_loss = (self.lost_packets / self.total_packets) * 100 if self.total_packets > 0 else 0
+
+        self.stats_label.setText(f"Avg: {avg_rtt:.1f} ms | Jitter: {jitter:.1f} ms | Packet Loss: {packet_loss:.1f}%")
 
 class TracerouteDialog(QDialog):
     def __init__(self, ip_address, parent=None):
