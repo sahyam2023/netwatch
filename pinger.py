@@ -682,26 +682,42 @@ class AlertManager(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rules = []
-        self.ip_states = defaultdict(lambda: defaultdict(lambda: deque(maxlen=60))) # ip -> metric -> deque of (timestamp, value)
+        # ip -> metric -> deque of (timestamp, value)
+        self.ip_states = defaultdict(lambda: defaultdict(lambda: deque(maxlen=60))) 
+        # --- FIX: Add state to track currently active alerts ---
+        # Stores tuples of (ip, rule_index) to prevent alert flooding
+        self.active_alerts = set()
 
     def add_rule(self, metric, operator, value, duration):
         rule = {"metric": metric, "operator": operator, "value": value, "duration": duration}
         self.rules.append(rule)
         return f"If {metric} {operator} {value} for {duration}s"
 
+    def reset(self):
+        """ Resets the state, including active alerts. """
+        self.ip_states.clear()
+        self.active_alerts.clear()
+
     def check_alerts(self, ip, data):
-        if "timeouts" in data:
-            self.ip_states[ip]["Timeouts"].append((time.time(), data["timeouts"]))
+        """ Checks all rules for a given IP and its new data. """
+        # Append new data points for checking
+        if data.get('status_level') == 'warning' and 'Timeout' in data.get('status', ''):
+            self.ip_states[ip]["Timeouts"].append((time.time(), 1))
         if "total_pings" in data and data["total_pings"] > 0:
             packet_loss = (data.get("timeouts", 0) / data["total_pings"]) * 100
             self.ip_states[ip]["Packet Loss %"].append((time.time(), packet_loss))
         if "timeouts" in data:
             self.ip_states[ip]["Packet Lost"].append((time.time(), data["timeouts"]))
 
-        for rule in self.rules:
-            self._check_rule_for_ip(ip, rule)
+        # Check each rule against the current state
+        for i, rule in enumerate(self.rules):
+            self._check_rule_for_ip(ip, rule, i) # Pass the rule index
 
-    def _check_rule_for_ip(self, ip, rule):
+    def _check_rule_for_ip(self, ip, rule, rule_index):
+        """
+        Evaluates a single rule for an IP and triggers alerts only once
+        per incident.
+        """
         metric = rule["metric"]
         op = rule["operator"]
         value = rule["value"]
@@ -709,24 +725,50 @@ class AlertManager(QObject):
 
         history = self.ip_states[ip][metric]
         
-        # Get relevant data points within the duration
+        # Get relevant data points within the rule's duration
         now = time.time()
-        relevant_points = [p[1] for p in history if now - p[0] <= duration]
+        relevant_points = [p for p in history if now - p[0] <= duration]
 
-        if not relevant_points:
-            return
+        # --- Evaluate if the rule's condition is currently met ---
+        condition_is_met = False
+        if relevant_points: # Don't check if there's no data in the time window
+            if metric == "Timeouts":
+                count = sum(p[1] for p in relevant_points)
+                if op == '>' and count > value:
+                    condition_is_met = True
+            else: # For metrics like "Packet Loss %"
+                # Check if all relevant points meet the condition consistently
+                # (This logic assumes the condition must hold for the whole period)
+                all_met = True
+                for point in relevant_points:
+                    if op == '>':
+                        if not point[1] > value:
+                            all_met = False
+                            break
+                
+                # Check if the condition was met for a sufficient duration
+                if all_met and (relevant_points[-1][0] - relevant_points[0][0]) >= duration:
+                    condition_is_met = True
 
-        # Check if all relevant points meet the condition
-        all_met = True
-        for point in relevant_points:
-            if op == '>':
-                if not point > value:
-                    all_met = False
-                    break
-        
-        if all_met and len(relevant_points) >= duration: # Ensure enough data
-            self.alert_triggered.emit(ip, f"Rule matched: {metric} {op} {value} for {duration}s")
+        # --- State-based Alerting Logic ---
+        alert_id = (ip, rule_index)
+        is_currently_active = alert_id in self.active_alerts
 
+        if condition_is_met:
+            # The problem condition is true.
+            if not is_currently_active:
+                # It wasn't active before, so this is a new trigger. Fire the alert!
+                rule_string = f"Rule matched: {metric} {op} {value} for {duration}s"
+                self.alert_triggered.emit(ip, rule_string)
+                # Mark it as active so it doesn't fire again immediately.
+                self.active_alerts.add(alert_id)
+        else:
+            # The problem condition is false.
+            if is_currently_active:
+                # It was active before, so the condition has now cleared.
+                # Remove it from the active set so it can trigger again later if the issue returns.
+                self.active_alerts.discard(alert_id)
+                # (Optional: you could emit a "condition cleared" signal here)
 # --- Animated Label Widget (No changes needed) ---
 class AnimatedLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -740,53 +782,6 @@ class AnimatedLabel(QLabel):
             self._background_color = color
             self.setStyleSheet(f"background-color: rgba({color.red()},{color.green()},{color.blue()},{color.alpha()}); padding: 6px; border: 1px solid #B0B0B0; border-radius: 3px;")
     backgroundColor = Property(QColor, getBackgroundColor, setBackgroundColor)
-
-class AlertManager(QObject):
-    alert_triggered = Signal(str, str) # ip, rule_string
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.rules = []
-        self.ip_states = defaultdict(lambda: defaultdict(lambda: deque(maxlen=60))) # ip -> metric -> deque of (timestamp, value)
-
-    def add_rule(self, metric, operator, value, duration):
-        rule = {"metric": metric, "operator": operator, "value": value, "duration": duration}
-        self.rules.append(rule)
-        return f"If {metric} {operator} {value} for {duration}s"
-
-    def check_alerts(self, ip, data):
-        if "total_pings" in data and data["total_pings"] > 0:
-            packet_loss = (data.get("timeouts", 0) / data["total_pings"]) * 100
-            self.ip_states[ip]["Packet Loss %"].append((time.time(), packet_loss))
-
-        for rule in self.rules:
-            self._check_rule_for_ip(ip, rule)
-
-    def _check_rule_for_ip(self, ip, rule):
-        metric = rule["metric"]
-        op = rule["operator"]
-        value = rule["value"]
-        duration = rule["duration"]
-
-        history = self.ip_states[ip][metric]
-        
-        # Get relevant data points within the duration
-        now = time.time()
-        relevant_points = [p[1] for p in history if now - p[0] <= duration]
-
-        if not relevant_points:
-            return
-
-        # Check if all relevant points meet the condition
-        all_met = True
-        for point in relevant_points:
-            if op == '>':
-                if not point > value:
-                    all_met = False
-                    break
-        
-        if all_met and len(relevant_points) >= duration: # Ensure enough data
-            self.alert_triggered.emit(ip, f"Rule matched: {metric} {op} {value} for {duration}s")
 
 class PingMonitorWindow(QMainWindow):
     request_stop_signal = Signal()
@@ -877,6 +872,10 @@ class PingMonitorWindow(QMainWindow):
 
         # --- Alert Manager ---
         self.alert_manager = AlertManager(self)
+        self.tray_icon = QSystemTrayIcon(QIcon(ICON_FILENAME), self)
+        self.tray_icon.show()
+        self.alert_sound = QSoundEffect()
+        self.alert_sound.setSource(QUrl.fromLocalFile("alert.wav"))
 
         # --- UI Initialization ---
         self._init_ui()
@@ -1988,6 +1987,7 @@ class PingMonitorWindow(QMainWindow):
             self.ping_model._checked_ips.clear()
             self.ping_model.endResetModel()
             self.ping_results_data.clear()
+            self.alert_manager.reset()
 
             # Clear logs
             self.log_text_edit.clear()
@@ -2360,6 +2360,7 @@ class PingMonitorWindow(QMainWindow):
         except: QMessageBox.critical(self, "Error", f"Invalid payload size (0-{MAX_PAYLOAD_SIZE})."); self.update_status("Idle - Invalid payload size", "error"); return
 
         # --- Reset State ---
+        self.alert_manager.reset()
         self.update_status("Initializing...", "running"); self.stop_event.clear(); self.stopping_initiated = False
         self.worker_threads.clear(); self.ping_results_data.clear(); self.log_text_edit.clear()
         self.active_workers_count = 0
@@ -2471,6 +2472,9 @@ class PingMonitorWindow(QMainWindow):
         
         if hasattr(self, 'graph_window') and self.graph_window.isVisible() and ip in self.graph_window.ip_addresses:
             self.graph_window.update_graph(ip, data.get("ping_time"))
+
+        if not self.stopping_initiated:
+            self.alert_manager.check_alerts(ip, data)
 
     @Slot()
     def _process_queued_updates(self):
