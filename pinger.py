@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
     QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
-    QCheckBox, QTabWidget, QGridLayout
+    QCheckBox, QTabWidget, QGridLayout, QComboBox
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
@@ -30,6 +30,7 @@ import pyqtgraph as pg
 from sympy import true
 import numpy as np
 import nmap
+import dns.resolver
 
 # --- Configuration ---
 MAX_IPS = 1000 # Increased limit
@@ -511,6 +512,39 @@ class SortFilterProxyModel(QSortFilterProxyModel):
         # For all other columns, use the default sorting behavior
         return super().lessThan(left, right)
 
+# --- DNS Query Worker ---
+class DnsQueryWorker(QObject):
+    results_ready = Signal(list)
+    error_occurred = Signal(str)
+    finished = Signal()
+
+    def __init__(self, hostname, query_type, dns_server=None):
+        super().__init__()
+        self.hostname = hostname
+        self.query_type = query_type
+        self.dns_server = dns_server
+
+    @Slot()
+    def run(self):
+        try:
+            resolver = dns.resolver.Resolver()
+            if self.dns_server:
+                resolver.nameservers = [self.dns_server]
+
+            answers = resolver.resolve(self.hostname, self.query_type)
+            results = [f"--- {self.query_type} records for {self.hostname} ---"]
+            for rdata in answers:
+                results.append(rdata.to_text())
+            self.results_ready.emit(results)
+        except dns.resolver.NoAnswer as e:
+            self.error_occurred.emit(f"No {self.query_type} records found for {self.hostname}.")
+        except dns.resolver.NXDOMAIN as e:
+            self.error_occurred.emit(f"The domain {self.hostname} does not exist.")
+        except Exception as e:
+            self.error_occurred.emit(f"An error occurred: {e}")
+        finally:
+            self.finished.emit()
+
 # --- Port Scan Worker ---
 class PortScanWorker(QObject):
     ports_scanned = Signal(str, str)
@@ -903,6 +937,44 @@ class PingMonitorWindow(QMainWindow):
 
         self.tab_widget.addTab(network_scan_page_widget, "Network Scan")
 
+        # Create DNS Diagnostics Page
+        dns_diag_page_widget = QWidget()
+        dns_diag_layout = QVBoxLayout(dns_diag_page_widget)
+        dns_diag_layout.setContentsMargins(10, 10, 10, 10)
+        dns_diag_layout.setSpacing(10)
+
+        # Inputs Group
+        dns_inputs_group = QGroupBox("DNS Query")
+        dns_inputs_layout = QHBoxLayout(dns_inputs_group)
+        dns_inputs_layout.addWidget(QLabel("Hostname/IP:"))
+        self.dns_hostname_input = QLineEdit()
+        self.dns_hostname_input.setPlaceholderText("e.g., google.com or 8.8.8.8")
+        dns_inputs_layout.addWidget(self.dns_hostname_input)
+        
+        dns_inputs_layout.addWidget(QLabel("Query Type:"))
+        self.dns_query_type_combo = QComboBox()
+        self.dns_query_type_combo.addItems(["A", "AAAA", "MX", "NS", "TXT", "CNAME", "PTR"])
+        dns_inputs_layout.addWidget(self.dns_query_type_combo)
+
+        dns_inputs_layout.addWidget(QLabel("DNS Server (Optional):"))
+        self.dns_server_input = QLineEdit()
+        self.dns_server_input.setPlaceholderText("e.g., 1.1.1.1")
+        dns_inputs_layout.addWidget(self.dns_server_input)
+
+        self.start_dns_query_button = QPushButton("Query")
+        dns_inputs_layout.addWidget(self.start_dns_query_button)
+        dns_diag_layout.addWidget(dns_inputs_group)
+
+        # Results View
+        dns_results_group = QGroupBox("Results")
+        dns_results_layout = QVBoxLayout(dns_results_group)
+        self.dns_results_text_edit = QTextEdit()
+        self.dns_results_text_edit.setReadOnly(True)
+        dns_results_layout.addWidget(self.dns_results_text_edit)
+        dns_diag_layout.addWidget(dns_results_group, 1)
+
+        self.tab_widget.addTab(dns_diag_page_widget, "DNS Diagnostics")
+
         # Add the tab widget to the main layout
         main_layout.addWidget(self.tab_widget)
 
@@ -938,6 +1010,41 @@ class PingMonitorWindow(QMainWindow):
         self.show_graph_button.clicked.connect(self._open_graph_window)
         self.start_scan_button.clicked.connect(self.handle_scan_request)
         self.stop_scan_button.clicked.connect(self.stop_scan)
+        self.start_dns_query_button.clicked.connect(self.start_dns_query)
+
+    def start_dns_query(self):
+        hostname = self.dns_hostname_input.text().strip()
+        query_type = self.dns_query_type_combo.currentText()
+        dns_server = self.dns_server_input.text().strip() or None
+
+        if not hostname:
+            QMessageBox.warning(self, "Input Error", "Please provide a hostname or IP address.")
+            return
+
+        self.dns_results_text_edit.clear()
+        self.dns_results_text_edit.append(f"Querying {hostname} for {query_type} records...")
+
+        self.dns_query_thread = QThread()
+        self.dns_query_worker = DnsQueryWorker(hostname, query_type, dns_server)
+        self.dns_query_worker.moveToThread(self.dns_query_thread)
+
+        self.dns_query_worker.results_ready.connect(self.handle_dns_results)
+        self.dns_query_worker.error_occurred.connect(self.handle_dns_error)
+        self.dns_query_worker.finished.connect(self.dns_query_thread.quit)
+        self.dns_query_worker.finished.connect(self.dns_query_worker.deleteLater)
+        self.dns_query_thread.finished.connect(self.dns_query_thread.deleteLater)
+
+        self.dns_query_thread.started.connect(self.dns_query_worker.run)
+        self.dns_query_thread.start()
+
+    def handle_dns_results(self, results):
+        self.dns_results_text_edit.clear()
+        for result in results:
+            self.dns_results_text_edit.append(result)
+
+    def handle_dns_error(self, error_message):
+        self.dns_results_text_edit.clear()
+        self.dns_results_text_edit.append(error_message)
 
     def stop_scan(self):
         if hasattr(self, 'nmap_worker') and self.nmap_worker:
