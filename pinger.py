@@ -15,8 +15,10 @@ import socket
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
-    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem
+    QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
+    QCheckBox, QTabWidget
 )
+from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
     Qt, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QThread, QTimer, QAbstractItemModel, QModelIndex, Qt,
     QPropertyAnimation, QEasingCurve, QPoint,
@@ -27,6 +29,7 @@ from PyQt5.QtCore import Qt, QObject, pyqtSlot as Slot, QThread, QTimer, QSortFi
 import pyqtgraph as pg
 from sympy import true
 import numpy as np
+import nmap
 
 # --- Configuration ---
 MAX_IPS = 1000 # Increased limit
@@ -608,6 +611,20 @@ class PingMonitorWindow(QMainWindow):
         self.apply_styles()
         self.update_status("Idle", "idle")
         self.check_admin_privileges_on_start()
+        self.check_for_nmap()
+
+    def check_for_nmap(self):
+        try:
+            nmap.PortScanner()
+            self.is_nmap_available = True
+        except nmap.PortScannerError:
+            self.is_nmap_available = False
+            tooltip = "Nmap is not installed or not in your system's PATH. Advanced scanning features are disabled."
+            self.advanced_options_group.setToolTip(tooltip)
+            self.log_event(tooltip, "warning")
+        
+        self.advanced_options_group.setEnabled(self.is_nmap_available)
+
 
     def check_admin_privileges_on_start(self):
         if sys.platform == 'win32' and not is_admin(): # Only check on Windows
@@ -619,12 +636,20 @@ class PingMonitorWindow(QMainWindow):
             self.update_status("Idle - Warning: Needs Admin Rights", "warning")
 
     def _init_ui(self):
-        # ... (UI setup is largely the same as before - QGroupBoxes, Layouts, Widgets) ...
-        # Make sure MAX_IPS placeholder reflects the new value if changed
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(10, 10, 10, 10); main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+
+        # Create the QTabWidget
+        self.tab_widget = QTabWidget()
+
+        # Create Ping Monitor Page
+        ping_monitor_page_widget = QWidget()
+        ping_monitor_layout = QVBoxLayout(ping_monitor_page_widget)
+        ping_monitor_layout.setContentsMargins(0, 0, 0, 0)  # No extra margins needed
+        ping_monitor_layout.setSpacing(10)
 
         # --- Configuration Group ---
         config_group = QGroupBox("Configuration")
@@ -672,87 +697,79 @@ class PingMonitorWindow(QMainWindow):
         top_row_layout.addWidget(range_group)
 
         top_row_layout.addStretch(1)
-        
-        # Single Port Scan Group
-        port_scan_group = QGroupBox("Single Port Scan")
-        port_scan_layout = QHBoxLayout(port_scan_group)
-        port_scan_layout.setSpacing(8)
-        port_scan_layout.addWidget(QLabel("IP Address:"))
-        self.single_port_ip_input = QLineEdit()
-        self.single_port_ip_input.setPlaceholderText("e.g., 8.8.8.8")
-        port_scan_layout.addWidget(self.single_port_ip_input)
-        port_scan_layout.addWidget(QLabel("Port:"))
-        self.single_port_input = QLineEdit()
-        self.single_port_input.setPlaceholderText("e.g., 443")
-        self.single_port_input.setFixedWidth(60)
-        port_scan_layout.addWidget(self.single_port_input)
-        self.single_port_scan_button = QPushButton("Scan Port")
-        port_scan_layout.addWidget(self.single_port_scan_button)
-        top_row_layout.addWidget(port_scan_group)
 
         config_layout.addLayout(top_row_layout)
 
         # IP Input Area
-        ip_controls_layout = QVBoxLayout() # Vertical layout for labels row + text edit
-
-        # Row for the Label and the new Count
+        ip_controls_layout = QVBoxLayout()
         ip_label_row_layout = QHBoxLayout()
         ip_label = QLabel("Target IPs/Hostnames:")
         ip_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        ip_label_row_layout.addWidget(ip_label) # Add the main label
-
+        ip_label_row_layout.addWidget(ip_label)
         self.clear_ips_button = QPushButton("Clear")
         self.clear_ips_button.setToolTip("Clears the target IPs list.")
         ip_label_row_layout.addWidget(self.clear_ips_button)
-
-        ip_label_row_layout.addStretch(1) # Pushes the count label to the right
-
-        # --- ADDED: IP Count Label ---
+        ip_label_row_layout.addStretch(1)
         self.ip_count_label = QLabel("Count: 0")
-        self.ip_count_label.setObjectName("ipCountLabel") # For potential styling
+        self.ip_count_label.setObjectName("ipCountLabel")
         self.ip_count_label.setToolTip("Number of non-empty lines entered below.")
-        self.ip_count_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight) # Align to right
-        ip_label_row_layout.addWidget(self.ip_count_label) # Add count label to the row
-        # --- END ADDED ---
+        self.ip_count_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        ip_label_row_layout.addWidget(self.ip_count_label)
+        ip_controls_layout.addLayout(ip_label_row_layout)
 
-        ip_controls_layout.addLayout(ip_label_row_layout) # Add the label+count row to the vertical layout
-
-        # The Text Edit itself
         self.ip_text_edit = QTextEdit()
-        self.ip_text_edit.setPlaceholderText(f"Enter one target per line (Max: {MAX_IPS})...") # Use MAX_IPS
+        self.ip_text_edit.setPlaceholderText(f"Enter one target per line (Max: {MAX_IPS})...")
         self.ip_text_edit.setAcceptRichText(False)
-        self.ip_text_edit.setFixedHeight(80) # Keep fixed height
-        ip_controls_layout.addWidget(self.ip_text_edit) # Add text edit below the labels row
-
-        # Add the new vertical layout (containing labels row and text edit) to the config group
+        self.ip_text_edit.setFixedHeight(80)
+        ip_controls_layout.addWidget(self.ip_text_edit)
         config_layout.addLayout(ip_controls_layout)
 
         # Duration and Payload Settings
         settings_layout = QHBoxLayout()
         settings_layout.addWidget(QLabel("Duration (min):"))
-        self.duration_input = QLineEdit("1"); self.duration_input.setFixedWidth(60); self.duration_input.setAlignment(Qt.AlignCenter)
+        self.duration_input = QLineEdit("1")
+        self.duration_input.setFixedWidth(60)
+        self.duration_input.setAlignment(Qt.AlignCenter)
         settings_layout.addWidget(self.duration_input)
         settings_layout.addSpacing(20)
         settings_layout.addWidget(QLabel("Payload Size (bytes):"))
-        self.payload_size_input = QLineEdit("32"); self.payload_size_input.setPlaceholderText(f"0-{MAX_PAYLOAD_SIZE}"); self.payload_size_input.setToolTip(f"ICMP payload size (0 to {MAX_PAYLOAD_SIZE} bytes recommended)"); self.payload_size_input.setFixedWidth(60); self.payload_size_input.setAlignment(Qt.AlignCenter)
+        self.payload_size_input = QLineEdit("32")
+        self.payload_size_input.setPlaceholderText(f"0-{MAX_PAYLOAD_SIZE}")
+        self.payload_size_input.setToolTip(f"ICMP payload size (0 to {MAX_PAYLOAD_SIZE} bytes recommended)")
+        self.payload_size_input.setFixedWidth(60)
+        self.payload_size_input.setAlignment(Qt.AlignCenter)
         settings_layout.addWidget(self.payload_size_input)
         settings_layout.addStretch(1)
         config_layout.addLayout(settings_layout)
-        main_layout.addWidget(config_group)
+        ping_monitor_layout.addWidget(config_group)
 
         # --- Controls Group ---
         control_layout = QHBoxLayout()
-        self.start_button = QPushButton("Start Monitoring"); self.start_button.setObjectName("startButton")
-        self.stop_button = QPushButton("Stop Monitoring"); self.stop_button.setEnabled(False)
-        self.reset_button = QPushButton("Reset"); self.reset_button.setObjectName("resetButton"); self.reset_button.setEnabled(False)
-        self.save_button = QPushButton("Save All Logs"); self.save_button.setEnabled(False)
-        self.save_filtered_button = QPushButton("Save Timeout Logs"); self.save_filtered_button.setEnabled(False)
-        self.save_selected_button = QPushButton("Save Selected Logs"); self.save_selected_button.setEnabled(False)
-        self.scan_ports_button = QPushButton("Scan Ports"); self.scan_ports_button.setEnabled(False)
-        self.traceroute_button = QPushButton("Traceroute"); self.traceroute_button.setEnabled(False)
-        self.select_ips_button = QPushButton("Select IPs"); self.select_ips_button.setCheckable(True); self.select_ips_button.setEnabled(False)
-        self.show_graph_button = QPushButton("Show Graph"); self.show_graph_button.setEnabled(False)
-        control_layout.addWidget(self.start_button); control_layout.addWidget(self.stop_button); control_layout.addWidget(self.save_button)
+        self.start_button = QPushButton("Start Monitoring")
+        self.start_button.setObjectName("startButton")
+        self.stop_button = QPushButton("Stop Monitoring")
+        self.stop_button.setEnabled(False)
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.setObjectName("resetButton")
+        self.reset_button.setEnabled(False)
+        self.save_button = QPushButton("Save All Logs")
+        self.save_button.setEnabled(False)
+        self.save_filtered_button = QPushButton("Save Timeout Logs")
+        self.save_filtered_button.setEnabled(False)
+        self.save_selected_button = QPushButton("Save Selected Logs")
+        self.save_selected_button.setEnabled(False)
+        self.scan_ports_button = QPushButton("Scan Ports")
+        self.scan_ports_button.setEnabled(False)
+        self.traceroute_button = QPushButton("Traceroute")
+        self.traceroute_button.setEnabled(False)
+        self.select_ips_button = QPushButton("Select IPs")
+        self.select_ips_button.setCheckable(True)
+        self.select_ips_button.setEnabled(False)
+        self.show_graph_button = QPushButton("Show Graph")
+        self.show_graph_button.setEnabled(False)
+        control_layout.addWidget(self.start_button)
+        control_layout.addWidget(self.stop_button)
+        control_layout.addWidget(self.save_button)
         control_layout.addWidget(self.save_filtered_button)
         control_layout.addWidget(self.save_selected_button)
         control_layout.addWidget(self.scan_ports_button)
@@ -761,52 +778,120 @@ class PingMonitorWindow(QMainWindow):
         control_layout.addStretch(1)
         control_layout.addWidget(self.select_ips_button)
         control_layout.addWidget(self.reset_button)
-        main_layout.addLayout(control_layout)
+        ping_monitor_layout.addLayout(control_layout)
 
         # --- Status & Progress ---
         status_layout = QHBoxLayout()
-        self.status_label = AnimatedLabel("Status: Idle"); self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft); self.status_label.setFixedHeight(30)
+        self.status_label = AnimatedLabel("Status: Idle")
+        self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.status_label.setFixedHeight(30)
         status_layout.addWidget(self.status_label, 1)
-        self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 100); self.progress_bar.setValue(0); self.progress_bar.setVisible(False); self.progress_bar.setFixedWidth(150); self.progress_bar.setTextVisible(True); self.progress_bar.setFormat("%p%")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFixedWidth(150)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
         status_layout.addWidget(self.progress_bar)
-        main_layout.addLayout(status_layout)
+        ping_monitor_layout.addLayout(status_layout)
 
-        # --- Results Group ---
+        # --- Results and Log Splitter ---
         results_group = QGroupBox("Monitoring Results")
         results_layout = QVBoxLayout(results_group)
-        self.results_view = QTreeView() # Create the view
-        self.results_view.setModel(self.proxy_model) # Set the proxy model
+        self.results_view = QTreeView()
+        self.results_view.setModel(self.proxy_model)
         self.results_view.setAlternatingRowColors(True)
-        self.results_view.setUniformRowHeights(True) # Good for performance
+        self.results_view.setUniformRowHeights(True)
         self.results_view.setSelectionMode(QTreeView.ExtendedSelection)
         self.results_view.setSelectionBehavior(QTreeView.SelectRows)
         self.results_view.setSortingEnabled(True)
         header = self.results_view.header()
-        header.setSectionResizeMode(QHeaderView.Interactive) # Allow user resize
-        # Set initial resize modes (adjust as needed)
+        header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(COL_IP, QHeaderView.Stretch)
         for i in range(COL_STATUS, NUM_COLUMNS):
             header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        results_layout.addWidget(self.results_view)
 
-        # Connect header signal for potential future custom sorting if needed
-        # header.sectionClicked.connect(self.on_header_clicked)
-
-        results_layout.addWidget(self.results_view) # Add the view to the layout
-        # =================================================
-
-        # --- Log Group ---
         log_group = QGroupBox("Event Log")
         log_layout = QVBoxLayout(log_group)
-        self.log_text_edit = QTextEdit(); self.log_text_edit.setReadOnly(True); self.log_text_edit.setFont(QFont("Consolas", 9)); self.log_text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.log_text_edit = QTextEdit()
+        self.log_text_edit.setReadOnly(True)
+        self.log_text_edit.setFont(QFont("Consolas", 9))
+        self.log_text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         log_layout.addWidget(self.log_text_edit)
 
-        # --- Splitter ---
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(results_group)
         splitter.addWidget(log_group)
         splitter.setSizes([600, 60])
+        ping_monitor_layout.addWidget(splitter, 1)
 
-        main_layout.addWidget(splitter, 1)
+        # Add Ping Monitor page to tab widget
+        self.tab_widget.addTab(ping_monitor_page_widget, "Ping Monitor")
+
+        # Create Network Scan Page
+        network_scan_page_widget = QWidget()
+        network_scan_layout = QVBoxLayout(network_scan_page_widget)
+        network_scan_layout.setContentsMargins(10, 10, 10, 10)
+        network_scan_layout.setSpacing(10)
+
+        # Inputs Group
+        inputs_group = QGroupBox("Scan Target")
+        inputs_layout = QHBoxLayout(inputs_group)
+        inputs_layout.addWidget(QLabel("Target IP/Hostname:"))
+        self.scan_target_input = QLineEdit()
+        self.scan_target_input.setPlaceholderText("e.g., 192.168.1.1 or example.com")
+        inputs_layout.addWidget(self.scan_target_input)
+        inputs_layout.addWidget(QLabel("Port Range:"))
+        self.port_range_input = QLineEdit()
+        self.port_range_input.setPlaceholderText("e.g., 22-1024, 8080")
+        self.port_range_input.setFixedWidth(200)
+        inputs_layout.addWidget(self.port_range_input)
+        network_scan_layout.addWidget(inputs_group)
+
+        # Advanced Options Group
+        self.advanced_options_group = QGroupBox("Advanced Options (Requires Nmap)")
+        advanced_options_layout = QHBoxLayout(self.advanced_options_group)
+        self.service_version_checkbox = QCheckBox("Enable Service & Version Detection")
+        advanced_options_layout.addWidget(self.service_version_checkbox)
+        self.os_detection_checkbox = QCheckBox("Enable OS Detection")
+        advanced_options_layout.addWidget(self.os_detection_checkbox)
+        self.advanced_options_group.setEnabled(False)
+        network_scan_layout.addWidget(self.advanced_options_group)
+
+        # Controls
+        controls_layout = QHBoxLayout()
+        self.start_scan_button = QPushButton("Start Scan")
+        self.start_scan_button.setStyleSheet("background-color: #2ECC71; color: white; font-weight: bold;")
+        controls_layout.addWidget(self.start_scan_button)
+        self.stop_scan_button = QPushButton("Stop Scan")
+        self.stop_scan_button.setStyleSheet("background-color: #A0A0A0; color: white; border: none; font-weight: bold;")
+        self.stop_scan_button.setEnabled(False)
+        controls_layout.addWidget(self.stop_scan_button)
+        controls_layout.addStretch(1)
+        network_scan_layout.addLayout(controls_layout)
+
+        # Status Label
+        self.scan_status_label = AnimatedLabel("Status: Idle")
+        self.scan_status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.scan_status_label.setFixedHeight(30)
+        network_scan_layout.addWidget(self.scan_status_label)
+
+        # Results View
+        results_group = QGroupBox("Scan Results")
+        results_layout = QVBoxLayout(results_group)
+        self.scan_results_view = QTreeView()
+        self.scan_results_model = QStandardItemModel()
+        self.scan_results_model.setHorizontalHeaderLabels(['Port', 'State', 'Service', 'Version'])
+        self.scan_results_view.setModel(self.scan_results_model)
+        results_layout.addWidget(self.scan_results_view)
+        network_scan_layout.addWidget(results_group, 1)
+
+        self.tab_widget.addTab(network_scan_page_widget, "Network Scan")
+
+        # Add the tab widget to the main layout
+        main_layout.addWidget(self.tab_widget)
 
         # Credit Label
         self.credit_label = QLabel("Created with 💓 by Sahyam | All rights reserved")
@@ -837,8 +922,134 @@ class PingMonitorWindow(QMainWindow):
         self.reset_button.clicked.connect(self.reset_application)
         self.scan_ports_button.clicked.connect(self.start_port_scan)
         self.traceroute_button.clicked.connect(self.start_traceroute)
-        self.single_port_scan_button.clicked.connect(self.start_single_port_scan)
         self.show_graph_button.clicked.connect(self._open_graph_window)
+        self.start_scan_button.clicked.connect(self.handle_scan_request)
+        self.stop_scan_button.clicked.connect(self.stop_scan)
+
+    def stop_scan(self):
+        if hasattr(self, 'nmap_worker') and self.nmap_worker:
+            self.nmap_worker.stop()
+        if hasattr(self, 'basic_scan_worker') and self.basic_scan_worker:
+            self.basic_scan_worker.stop()
+        self.update_scan_status("Stopping...", "stopping")
+        self.stop_scan_button.setEnabled(False)
+        self.stop_scan_button.setStyleSheet("background-color: #A0A0A0; color: white; border: none; font-weight: bold;")
+        self.log_event("Scan stopped by user.", "info")
+
+    def handle_scan_request(self):
+        target = self.scan_target_input.text().strip()
+        ports = self.port_range_input.text().strip()
+
+        if not target or not ports:
+            QMessageBox.warning(self, "Input Error", "Please provide a target and port range.")
+            return
+
+        use_nmap = (self.is_nmap_available and
+                    (self.service_version_checkbox.isChecked() or
+                     self.os_detection_checkbox.isChecked()))
+
+        if use_nmap:
+            self.start_nmap_scan(target, ports)
+        else:
+            self.start_basic_scan(target, ports)
+
+    def start_nmap_scan(self, target, ports):
+        self.update_scan_status(f"Scanning {target}...", "running")
+        self.log_event(f"Starting advanced Nmap scan on {target}:{ports}", "info")
+        self.start_scan_button.setEnabled(False)
+        self.start_scan_button.setStyleSheet("background-color: #A0A0A0; color: white; border: none; font-weight: bold;")
+        self.stop_scan_button.setEnabled(True)
+        self.stop_scan_button.setStyleSheet("background-color: #E74C3C; color: white; font-weight: bold;")
+        self.scan_results_model.removeRows(0, self.scan_results_model.rowCount())
+
+        arguments = '-sS' # Default to SYN scan
+        if self.service_version_checkbox.isChecked():
+            arguments += ' -sV'
+        if self.os_detection_checkbox.isChecked():
+            arguments += ' -O'
+        
+        self.nmap_worker = NmapScanWorker(target, ports, arguments)
+        self.nmap_thread = QThread()
+        self.nmap_worker.moveToThread(self.nmap_thread)
+        self.nmap_worker.scan_finished.connect(self.handle_nmap_result)
+        self.nmap_worker.finished.connect(self._scan_finished)
+        self.nmap_worker.finished.connect(self.nmap_thread.quit)
+        self.nmap_worker.finished.connect(self.nmap_worker.deleteLater)
+        self.nmap_thread.finished.connect(self.nmap_thread.deleteLater)
+        self.nmap_thread.started.connect(self.nmap_worker.run)
+        self.nmap_thread.start()
+
+    def start_basic_scan(self, target, ports):
+        self.update_scan_status(f"Scanning {target}...", "running")
+        self.log_event(f"Starting basic port scan on {target}:{ports}", "info")
+        self.start_scan_button.setEnabled(False)
+        self.start_scan_button.setStyleSheet("background-color: #A0A0A0; color: white; border: none; font-weight: bold;")
+        self.stop_scan_button.setEnabled(True)
+        self.stop_scan_button.setStyleSheet("background-color: #E74C3C; color: white; font-weight: bold;")
+        self.scan_results_model.removeRows(0, self.scan_results_model.rowCount())
+
+        self.basic_scan_worker = BasicPortScanWorker(target, ports)
+        self.basic_scan_thread = QThread()
+        self.basic_scan_worker.moveToThread(self.basic_scan_thread)
+        self.basic_scan_worker.port_status.connect(self.handle_basic_scan_result)
+        self.basic_scan_worker.finished.connect(self._scan_finished)
+        self.basic_scan_worker.finished.connect(self.basic_scan_thread.quit)
+        self.basic_scan_worker.finished.connect(self.basic_scan_worker.deleteLater)
+        self.basic_scan_thread.finished.connect(self.basic_scan_thread.deleteLater)
+        self.basic_scan_thread.started.connect(self.basic_scan_worker.run)
+        self.basic_scan_thread.start()
+
+    def handle_nmap_result(self, result):
+        if 'scan' in result:
+            for host in result['scan']:
+                if 'tcp' in result['scan'][host]:
+                    for port, port_data in result['scan'][host]['tcp'].items():
+                        row = [
+                            QStandardItem(str(port)),
+                            QStandardItem(port_data.get('state', '')),
+                            QStandardItem(port_data.get('name', '')),
+                            QStandardItem(port_data.get('version', ''))
+                        ]
+                        self.scan_results_model.appendRow(row)
+        self.log_event("Nmap scan finished.", "info")
+
+    def handle_basic_scan_result(self, port, status):
+        row = [
+            QStandardItem(str(port)),
+            QStandardItem(status)
+        ]
+        self.scan_results_model.appendRow(row)
+
+    def update_scan_status(self, message, level="info"):
+        self.scan_status_label.setText(f"Status: {message}")
+        target_color = self.status_bg_colors.get(level, self.status_bg_colors["idle"])
+        current_qcolor = self.scan_status_label.getBackgroundColor()
+        if current_qcolor != target_color:
+            self.status_animation.stop()
+            self.status_animation.setStartValue(current_qcolor)
+            self.status_animation.setEndValue(target_color)
+            self.status_animation.start()
+        else:
+            self.scan_status_label.setBackgroundColor(target_color)
+
+    def _scan_finished(self):
+        self.start_scan_button.setEnabled(True)
+        self.stop_scan_button.setEnabled(False)
+        self.start_scan_button.setStyleSheet("background-color: #2ECC71; color: white; font-weight: bold;")
+        self.stop_scan_button.setStyleSheet("background-color: #A0A0A0; color: white; border: none; font-weight: bold;")
+        
+        worker_was_stopped = False
+        if hasattr(self, 'basic_scan_worker') and self.basic_scan_worker and not self.basic_scan_worker._is_running:
+            worker_was_stopped = True
+        
+        if hasattr(self, 'nmap_worker') and self.nmap_worker and not self.nmap_worker._is_running:
+            worker_was_stopped = True
+
+        if worker_was_stopped:
+            self.update_scan_status("Stopped", "idle")
+        else:
+            self.update_scan_status("Finished", "finished")
+            self.log_event("Scan finished.", "info")
 
     def _open_graph_window(self):
         selected_indexes = self.results_view.selectionModel().selectedRows()
@@ -1896,6 +2107,73 @@ class GraphWindow(QMainWindow):
         packet_loss = (self.lost_packets / self.total_packets) * 100 if self.total_packets > 0 else 0
 
         self.stats_label.setText(f"Avg: {avg_rtt:.1f} ms | Jitter: {jitter:.1f} ms | Packet Loss: {packet_loss:.1f}%")
+
+
+class NmapScanWorker(QObject):
+    scan_finished = Signal(dict)
+    finished = Signal()
+
+    def __init__(self, target, ports, arguments):
+        super().__init__()
+        self.target = target
+        self.ports = ports
+        self.arguments = arguments
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    @Slot()
+    def run(self):
+        scanner = nmap.PortScanner()
+        # This is a bit of a hack, as python-nmap doesn't support stopping a scan directly.
+        # We can't interrupt the scan, but we can prevent it from starting if stop() is called early.
+        if self._is_running:
+            result = scanner.scan(self.target, self.ports, self.arguments)
+            if self._is_running:
+                self.scan_finished.emit(result)
+        self.finished.emit()
+
+
+class BasicPortScanWorker(QObject):
+    port_status = Signal(int, str)
+    finished = Signal()
+
+    def __init__(self, target, ports):
+        super().__init__()
+        self.target = target
+        self.ports = self._parse_ports(ports)
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def _parse_ports(self, ports_str):
+        """Parses a port string like '22-25,80,443' into a list of integers."""
+        ports = set()
+        for part in ports_str.split(','):
+            part = part.strip()
+            if '-' in part:
+                start, end = part.split('-')
+                ports.update(range(int(start), int(end) + 1))
+            else:
+                ports.add(int(part))
+        return sorted(list(ports))
+
+    @Slot()
+    def run(self):
+        for port in self.ports:
+            if not self._is_running:
+                break
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1)
+                result = sock.connect_ex((self.target, port))
+                if self._is_running:
+                    if result == 0:
+                        self.port_status.emit(port, "Open")
+                    else:
+                        self.port_status.emit(port, "Closed")
+        self.finished.emit()
 
 
 class LivePathAnalysisWindow(QDialog):
