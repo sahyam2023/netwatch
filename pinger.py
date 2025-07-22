@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
     QTreeWidgetItem, QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
-    QCheckBox, QTabWidget
+    QCheckBox, QTabWidget, QGridLayout
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
@@ -560,6 +560,7 @@ class PingMonitorWindow(QMainWindow):
         # ... (Window setup, icon setup - same as before) ...
         self.setWindowTitle("PingWatch")
         self.setMinimumSize(900, 700)
+        self.resize(1280, 720)
         # Correct path finding for bundled app
         if getattr(sys, 'frozen', False): base_path = sys._MEIPASS
         else: base_path = os.path.dirname(os.path.abspath(__file__))
@@ -736,6 +737,49 @@ class PingMonitorWindow(QMainWindow):
         settings_layout.addStretch(1)
         sidebar_layout.addLayout(settings_layout)
 
+        # Status & Progress Bar
+        status_layout = QHBoxLayout()
+        self.status_label = AnimatedLabel("Status: Idle")
+        self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.status_label.setFixedHeight(30)
+        status_layout.addWidget(self.status_label, 1)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFixedWidth(150)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
+        status_layout.addWidget(self.progress_bar)
+        sidebar_layout.addLayout(status_layout)
+
+        # Secondary Actions Button Bar
+        button_grid_layout = QGridLayout()
+        self.save_button = QPushButton("Save All Logs")
+        self.save_button.setEnabled(False)
+        self.save_filtered_button = QPushButton("Save Timeout Logs")
+        self.save_filtered_button.setEnabled(False)
+        self.save_selected_button = QPushButton("Save Selected Logs")
+        self.save_selected_button.setEnabled(False)
+        self.scan_ports_button = QPushButton("Scan Ports")
+        self.scan_ports_button.setEnabled(False)
+        self.traceroute_button = QPushButton("Traceroute")
+        self.traceroute_button.setEnabled(False)
+        self.show_graph_button = QPushButton("Show Graph")
+        self.show_graph_button.setEnabled(False)
+        self.select_ips_button = QPushButton("Select IPs")
+        self.select_ips_button.setCheckable(True)
+        self.select_ips_button.setEnabled(False)
+        
+        button_grid_layout.addWidget(self.save_button, 0, 0)
+        button_grid_layout.addWidget(self.save_filtered_button, 0, 1)
+        button_grid_layout.addWidget(self.save_selected_button, 0, 2)
+        button_grid_layout.addWidget(self.scan_ports_button, 1, 0)
+        button_grid_layout.addWidget(self.traceroute_button, 1, 1)
+        button_grid_layout.addWidget(self.show_graph_button, 1, 2)
+        button_grid_layout.addWidget(self.select_ips_button, 2, 0, 1, 3)
+        sidebar_layout.addLayout(button_grid_layout)
+
         sidebar_layout.addStretch(1) # Pushes buttons to the bottom
 
         # Primary Action Buttons
@@ -755,50 +799,6 @@ class PingMonitorWindow(QMainWindow):
         main_content_layout = QVBoxLayout(self.main_content_widget)
         main_content_layout.setContentsMargins(10, 10, 10, 10)
         main_content_layout.setSpacing(10)
-
-        # Status & Progress Bar
-        status_layout = QHBoxLayout()
-        self.status_label = AnimatedLabel("Status: Idle")
-        self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        self.status_label.setFixedHeight(30)
-        status_layout.addWidget(self.status_label, 1)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedWidth(150)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("%p%")
-        status_layout.addWidget(self.progress_bar)
-        main_content_layout.addLayout(status_layout)
-
-        # Secondary Actions Button Bar
-        actions_bar_layout = QHBoxLayout()
-        self.save_button = QPushButton("Save All Logs")
-        self.save_button.setEnabled(False)
-        self.save_filtered_button = QPushButton("Save Timeout Logs")
-        self.save_filtered_button.setEnabled(False)
-        self.save_selected_button = QPushButton("Save Selected Logs")
-        self.save_selected_button.setEnabled(False)
-        self.scan_ports_button = QPushButton("Scan Ports")
-        self.scan_ports_button.setEnabled(False)
-        self.traceroute_button = QPushButton("Traceroute")
-        self.traceroute_button.setEnabled(False)
-        self.show_graph_button = QPushButton("Show Graph")
-        self.show_graph_button.setEnabled(False)
-        self.select_ips_button = QPushButton("Select IPs")
-        self.select_ips_button.setCheckable(True)
-        self.select_ips_button.setEnabled(False)
-        actions_bar_layout.addWidget(self.save_button)
-        actions_bar_layout.addWidget(self.save_filtered_button)
-        actions_bar_layout.addWidget(self.save_selected_button)
-        actions_bar_layout.addSpacing(15)
-        actions_bar_layout.addWidget(self.scan_ports_button)
-        actions_bar_layout.addWidget(self.traceroute_button)
-        actions_bar_layout.addWidget(self.show_graph_button)
-        actions_bar_layout.addStretch(1)
-        actions_bar_layout.addWidget(self.select_ips_button)
-        main_content_layout.addLayout(actions_bar_layout)
 
         # Results and Log Splitter (The existing vertical one)
         results_group = QGroupBox("Monitoring Results")
