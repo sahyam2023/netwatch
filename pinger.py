@@ -494,14 +494,79 @@ class PingWorker(QObject):
         # Emit final status directly to the GUI item one last time
         self.final_status_update.emit(self.ip_address, final_status_text, final_status_level)
         self.finished.emit(self.ip_address)
+# This class should be defined in your file, either globally or inside _init_ui
 class PacketCaptureProxyModel(QSortFilterProxyModel):
     def filterAcceptsRow(self, source_row, source_parent):
-        if not self.filterRegExp().pattern():
+        # Get the filter string from the QLineEdit
+        filter_text = self.filterRegExp().pattern().lower()
+
+        # If the filter is empty, show all rows
+        if not filter_text:
             return True
 
+        # Get the QModelIndex for the first column of the source row
+        source_index = self.sourceModel().index(source_row, 0, source_parent)
+        
+        # Retrieve the raw Scapy packet we stored earlier
+        packet = self.sourceModel().data(source_index, Qt.UserRole)
+
+        # If for some reason there's no packet, hide the row
+        if not packet:
+            return False
+
+        # --- PARSE AND EVALUATE THE FILTER ---
+        # This is a simplified parser. It can be made much more complex.
+        # It handles simple cases like:
+        # "tcp", "udp", "arp"
+        # "ip.addr == 8.8.8.8"
+        # "tcp.port == 443"
+        
+        try:
+            if "==" in filter_text:
+                key, value = [x.strip() for x in filter_text.split('==', 1)]
+                
+                if key == "ip.addr":
+                    return packet.haslayer(IP) and (packet[IP].src == value or packet[IP].dst == value)
+                elif key == "ip.src":
+                    return packet.haslayer(IP) and packet[IP].src == value
+                elif key == "ip.dst":
+                    return packet.haslayer(IP) and packet[IP].dst == value
+                elif key == "tcp.port":
+                    value = int(value)
+                    return packet.haslayer(TCP) and (packet[TCP].sport == value or packet[TCP].dport == value)
+                elif key == "udp.port":
+                    value = int(value)
+                    return packet.haslayer(UDP) and (packet[UDP].sport == value or packet[UDP].dport == value)
+                else:
+                    # Unrecognized filter key, fall back to simple text search
+                    return self.simple_text_search(filter_text, source_row, source_parent)
+
+            else:
+                # If no "==", treat it as a protocol name or simple text search
+                if filter_text == "tcp":
+                    return packet.haslayer(TCP)
+                elif filter_text == "udp":
+                    return packet.haslayer(UDP)
+                elif filter_text == "icmp":
+                    return packet.haslayer(ICMP)
+                elif filter_text == "arp":
+                    return packet.haslayer(ARP)
+                elif filter_text == "dns":
+                    return packet.haslayer(DNS)
+                else:
+                    # Fall back to searching the visible text in the row
+                    return self.simple_text_search(filter_text, source_row, source_parent)
+
+        except (ValueError, IndexError):
+            # Handle errors in parsing (e.g., tcp.port == "hello")
+            return False
+
+    def simple_text_search(self, text, source_row, source_parent):
+        """A helper for basic text search across all columns."""
         for i in range(self.sourceModel().columnCount()):
             index = self.sourceModel().index(source_row, i, source_parent)
-            if self.filterRegExp().indexIn(self.sourceModel().data(index)) != -1:
+            row_data = str(self.sourceModel().data(index)).lower()
+            if text in row_data:
                 return True
         return False
 
@@ -1405,6 +1470,13 @@ class PingMonitorWindow(QMainWindow):
 
         # Update raw bytes view
         self.raw_bytes_text.setText(self.format_raw_bytes(packet))
+    
+    @Slot(str)
+    def filter_capture_table(self, text):
+        """Applies the display filter text to the proxy model."""
+        # The setFilterRegExp method can handle simple strings.
+        # It will hide any row where no column contains the given text.
+        self.capture_proxy_model.setFilterRegExp(text)
 
     @Slot()
     def _on_capture_thread_finished(self):
@@ -1734,13 +1806,20 @@ class PingMonitorWindow(QMainWindow):
     def _open_graph_window(self):
         selected_indexes = self.results_view.selectionModel().selectedRows()
         if not selected_indexes:
-            QMessageBox.information(self, "No Selection", "Please select an IP to graph.")
+            QMessageBox.information(self, "No Selection", "Please select at least one IP to graph.")
             return
 
-        source_index = self.proxy_model.mapToSource(selected_indexes[0])
-        ip_address = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
-        
-        self.graph_window = GraphWindow(ip_address)
+        ip_addresses = []
+        for index in selected_indexes:
+            source_index = self.proxy_model.mapToSource(index)
+            ip = self.ping_model.data(self.ping_model.index(source_index.row(), COL_IP), Qt.DisplayRole)
+            ip_addresses.append(ip)
+
+        if not ip_addresses:
+            QMessageBox.information(self, "No Selection", "Please select at least one IP to graph.")
+            return
+
+        self.graph_window = GraphWindow(ip_addresses)
         self.graph_window.show()
 
     @Slot()
@@ -2252,8 +2331,8 @@ class PingMonitorWindow(QMainWindow):
              # Fallback in case it wasn't initialized (should be rare)
              self.ping_results_data[ip] = data
         
-        if hasattr(self, 'graph_window') and self.graph_window.ip_address == ip and "ping_time" in data:
-            self.graph_window.update_graph(data["ping_time"])
+        if hasattr(self, 'graph_window') and self.graph_window.isVisible() and ip in self.graph_window.ip_addresses:
+            self.graph_window.update_graph(ip, data.get("ping_time"))
 
     @Slot()
     def _process_queued_updates(self):
@@ -2772,14 +2851,12 @@ class PingMonitorWindow(QMainWindow):
             self.progress_bar.setValue(progress)
 
 class GraphWindow(QMainWindow):
-    def __init__(self, ip_address, parent=None):
+    def __init__(self, ip_addresses, parent=None):
         super().__init__(parent)
-        self.ip_address = ip_address
-        self.setWindowTitle(f"Ping Graph for {self.ip_address}")
+        self.ip_addresses = ip_addresses
+        self.setWindowTitle(f"Ping Graph for {', '.join(self.ip_addresses)}")
         self.setMinimumSize(800, 400)
 
-        # In GraphWindow.__init__
-        # Create a layout to hold the graph and the stats
         layout = QVBoxLayout()
         self.stats_label = QLabel("Avg: -- ms | Jitter: -- ms | Packet Loss: --%")
         self.stats_label.setAlignment(Qt.AlignCenter)
@@ -2795,25 +2872,35 @@ class GraphWindow(QMainWindow):
         self.graph_widget.setLabel('left', 'Ping Time (ms)', color='black', size=30)
         self.graph_widget.setLabel('bottom', 'Time', color='black', size=30)
         self.graph_widget.showGrid(x=True, y=True)
+        self.graph_widget.getPlotItem().addLegend()
 
         # Add these lines after creating the graph_widget
         self.graph_widget.addItem(pg.InfiniteLine(pos=100, angle=0, movable=False, pen=pg.mkPen('y', style=Qt.DotLine)))
         self.graph_widget.addItem(pg.InfiniteLine(pos=250, angle=0, movable=False, pen=pg.mkPen('r', style=Qt.DotLine)))
 
         # Add a label to explain them
-        self.graph_widget.getPlotItem().addLegend().addItem(pg.PlotDataItem(pen='g'), 'Good (<100ms)')
-        self.graph_widget.getPlotItem().addLegend().addItem(pg.PlotDataItem(pen='y'), 'Warning (100-250ms)')
-        self.graph_widget.getPlotItem().addLegend().addItem(pg.PlotDataItem(pen='r'), 'Poor (>250ms)')
-        
-        self.ping_times = deque(maxlen=100)
-        self.time_stamps = deque(maxlen=100)
-        # In GraphWindow class, add a new list to store only valid ping times
-        self.valid_ping_times = deque(maxlen=100)
-        self.total_packets = 0
-        self.lost_packets = 0
+        self.graph_widget.getPlotItem().legend.addItem(pg.PlotDataItem(pen='g'), 'Good (<100ms)')
+        self.graph_widget.getPlotItem().legend.addItem(pg.PlotDataItem(pen='y'), 'Warning (100-250ms)')
+        self.graph_widget.getPlotItem().legend.addItem(pg.PlotDataItem(pen='r'), 'Poor (>250ms)')
 
-        self.scatter = pg.ScatterPlotItem(size=5, pen=pg.mkPen(None))
-        self.graph_widget.addItem(self.scatter)
+        self.plot_data = {}
+        colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k']
+
+        for i, ip in enumerate(self.ip_addresses):
+            color = colors[i % len(colors)]
+            plot_item = pg.PlotDataItem(pen=pg.mkPen(color, width=2), name=ip)
+            scatter_item = pg.ScatterPlotItem(size=8, pen=pg.mkPen(None), symbol='o', brush=pg.mkBrush(color))
+            self.graph_widget.addItem(plot_item)
+            self.graph_widget.addItem(scatter_item)
+            self.plot_data[ip] = {
+                "ping_times": deque(maxlen=100),
+                "time_stamps": deque(maxlen=100),
+                "plot_item": plot_item,
+                "scatter_item": scatter_item,
+                "total_packets": 0,
+                "lost_packets": 0,
+                "valid_ping_times": deque(maxlen=100)
+            }
 
     def get_brush_for_ping(self, ping):
         if ping is None or np.isnan(ping):
@@ -2825,32 +2912,42 @@ class GraphWindow(QMainWindow):
         else:
             return pg.mkBrush('r')
 
-    def update_graph(self, ping_time):
-        self.total_packets += 1
+    def update_graph(self, ip_address, ping_time):
+        if ip_address not in self.plot_data:
+            return
+
+        data = self.plot_data[ip_address]
+        data["total_packets"] += 1
+        
+        current_time = time.time()
+        data["time_stamps"].append(current_time)
+
         if ping_time is not None:
-            self.ping_times.append(ping_time)
-            self.valid_ping_times.append(ping_time)
+            data["ping_times"].append(ping_time)
+            data["valid_ping_times"].append(ping_time)
         else:
-            self.ping_times.append(float('nan')) # Use NaN for gaps
-            self.lost_packets += 1
-            
-        self.time_stamps.append(time.time())
-        points = [{'pos': (t, p), 'brush': self.get_brush_for_ping(p)} for t, p in zip(self.time_stamps, self.ping_times)]
-        self.scatter.setData(points)
+            data["ping_times"].append(float('nan'))
+            data["lost_packets"] += 1
+        
+        x_vals = np.array(list(data["time_stamps"]), dtype=float)
+        y_vals = np.array(list(data["ping_times"]), dtype=float)
+        
+        data["plot_item"].setData(x=x_vals, y=y_vals, connect="finite")
+        
+        valid_points = [{'pos': (t, p), 'brush': self.get_brush_for_ping(p)} for t, p in zip(x_vals, y_vals) if not np.isnan(p)]
+        data["scatter_item"].setData(valid_points)
 
-        # --- Calculate and Display Stats ---
-        if self.valid_ping_times:
-            avg_rtt = sum(self.valid_ping_times) / len(self.valid_ping_times)
-            # Jitter is the standard deviation
-            sum_sq_diff = sum((x - avg_rtt) ** 2 for x in self.valid_ping_times)
-            jitter = (sum_sq_diff / len(self.valid_ping_times)) ** 0.5
-        else:
-            avg_rtt = 0
-            jitter = 0
+        if len(self.ip_addresses) == 1:
+            if data["valid_ping_times"]:
+                avg_rtt = sum(data["valid_ping_times"]) / len(data["valid_ping_times"])
+                sum_sq_diff = sum((x - avg_rtt) ** 2 for x in data["valid_ping_times"])
+                jitter = (sum_sq_diff / len(data["valid_ping_times"])) ** 0.5
+            else:
+                avg_rtt = 0
+                jitter = 0
             
-        packet_loss = (self.lost_packets / self.total_packets) * 100 if self.total_packets > 0 else 0
-
-        self.stats_label.setText(f"Avg: {avg_rtt:.1f} ms | Jitter: {jitter:.1f} ms | Packet Loss: {packet_loss:.1f}%")
+            packet_loss = (data["lost_packets"] / data["total_packets"]) * 100 if data["total_packets"] > 0 else 0
+            self.stats_label.setText(f"Avg: {avg_rtt:.1f} ms | Jitter: {jitter:.1f} ms | Packet Loss: {packet_loss:.1f}%")
 
 
 class NmapScanWorker(QObject):
