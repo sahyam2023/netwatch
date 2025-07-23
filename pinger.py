@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
     QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
-    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView, QListWidget, QSystemTrayIcon, QSlider, QSizePolicy
+    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView, QListWidget, QSystemTrayIcon, QSlider, QSizePolicy, QFormLayout
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
@@ -1374,78 +1374,66 @@ class PingMonitorWindow(QMainWindow):
         # Create Calculators Page
         self.calculators_page_widget = QWidget()
         calculators_layout = QVBoxLayout(self.calculators_page_widget)
-        calculators_layout.addSpacing(10)
+        calculators_layout.addSpacing(15)
         
         # Camera Storage Calculator
         camera_storage_group = QGroupBox("Camera Storage Calculator")
-        camera_storage_main_layout = QVBoxLayout(camera_storage_group)
-        camera_storage_main_layout.setContentsMargins(10, 15, 10, 10)
-        camera_storage_main_layout.setSpacing(10)
-
-        camera_storage_grid_layout = QGridLayout()
-        camera_storage_grid_layout.setSpacing(5)
+        form_layout = QFormLayout(camera_storage_group)
+        form_layout.setContentsMargins(10, 15, 10, 10)
+        form_layout.setSpacing(5)
 
         self.num_cameras_input = QLineEdit()
         self.bandwidth_input = QLineEdit()
         self.recording_hours_input = QLineEdit()
         self.retention_days_input = QLineEdit()
-        
-        for line_edit in [self.num_cameras_input, self.bandwidth_input, self.recording_hours_input, self.retention_days_input]:
-            line_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        camera_storage_grid_layout.addWidget(QLabel("Number of Cameras:"), 0, 0)
-        camera_storage_grid_layout.addWidget(self.num_cameras_input, 0, 1)
-        camera_storage_grid_layout.addWidget(QLabel("Bandwidth (Mbps per camera):"), 1, 0)
-        camera_storage_grid_layout.addWidget(self.bandwidth_input, 1, 1)
-        camera_storage_grid_layout.addWidget(QLabel("Recording Hours per Day:"), 2, 0)
-        camera_storage_grid_layout.addWidget(self.recording_hours_input, 2, 1)
-        camera_storage_grid_layout.addWidget(QLabel("Retention Days:"), 3, 0)
-        camera_storage_grid_layout.addWidget(self.retention_days_input, 3, 1)
-
-        camera_storage_main_layout.addLayout(camera_storage_grid_layout)
+        form_layout.addRow("Number of Cameras:", self.num_cameras_input)
+        form_layout.addRow("Bandwidth (Mbps per camera):", self.bandwidth_input)
+        form_layout.addRow("Recording Hours per Day:", self.recording_hours_input)
+        form_layout.addRow("Retention Days:", self.retention_days_input)
 
         # Button Layout
         storage_button_layout = QHBoxLayout()
         self.calculate_storage_button = QPushButton("Calculate Storage")
+        self.clear_storage_button = QPushButton("Clear")
+        self.clear_storage_button.setFixedWidth(50)
         storage_button_layout.addStretch(1)
         storage_button_layout.addWidget(self.calculate_storage_button)
+        storage_button_layout.addWidget(self.clear_storage_button)
         storage_button_layout.addStretch(1)
-        camera_storage_main_layout.addLayout(storage_button_layout)
+        form_layout.addRow(storage_button_layout)
 
         # Output Layout
-        storage_output_layout = QHBoxLayout()
-        storage_output_layout.addWidget(QLabel("Total Storage Required (TB):"))
         self.total_storage_output = QLineEdit()
         self.total_storage_output.setReadOnly(True)
-        self.total_storage_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        storage_output_layout.addWidget(self.total_storage_output)
-        camera_storage_main_layout.addLayout(storage_output_layout)
+        form_layout.addRow("Total Storage Required (TB):", self.total_storage_output)
 
         calculators_layout.addWidget(camera_storage_group)
 
         # RAID Performance Calculator
         raid_performance_group = QGroupBox("RAID Performance Calculator")
+        self.raid_output_grid = QGridLayout()
+        self.raid_output_grid.setSpacing(5)
+
         raid_performance_main_layout = QVBoxLayout(raid_performance_group)
         raid_performance_main_layout.setContentsMargins(10, 15, 10, 10)
         raid_performance_main_layout.setSpacing(10)
 
-        # Input Fields (Top Section - Grid)
-        raid_input_grid = QGridLayout()
-        raid_input_grid.setSpacing(5)
+        # Input Fields (Top Section - QFormLayout)
+        raid_input_form_layout = QFormLayout()
+        raid_input_form_layout.setSpacing(5)
         self.num_drives_input = QLineEdit()
         self.single_drive_iops_input = QLineEdit()
         self.single_drive_throughput_input = QLineEdit()
         self.raid_level_combo = QComboBox()
         self.raid_level_combo.addItems(["RAID 0", "RAID 1", "RAID 5", "RAID 6", "RAID 10"])
-        raid_input_grid.addWidget(QLabel("Number of Drives:"), 0, 0)
-        raid_input_grid.addWidget(self.num_drives_input, 0, 1)
-        raid_input_grid.addWidget(QLabel("Single Drive IOPS:"), 1, 0)
-        raid_input_grid.addWidget(self.single_drive_iops_input, 1, 1)
-        raid_input_grid.addWidget(QLabel("Single Drive Throughput (MB/s):"), 2, 0)
-        raid_input_grid.addWidget(self.single_drive_throughput_input, 2, 1)
-        raid_input_grid.addWidget(QLabel("RAID Level:"), 3, 0)
-        raid_input_grid.addWidget(self.raid_level_combo, 3, 1)
-        raid_performance_main_layout.addLayout(raid_input_grid)
+
+        raid_input_form_layout.addRow("Number of Drives:", self.num_drives_input)
+        raid_input_form_layout.addRow("Single Drive IOPS:", self.single_drive_iops_input)
+        raid_input_form_layout.addRow("Single Drive Throughput (MB/s):", self.single_drive_throughput_input)
+        raid_input_form_layout.addRow("RAID Level:", self.raid_level_combo)
+
+        raid_performance_main_layout.addLayout(raid_input_form_layout)
 
         # Read/Write Ratio Slider
         read_write_ratio_layout = QHBoxLayout()
@@ -1455,42 +1443,151 @@ class PingMonitorWindow(QMainWindow):
         read_write_ratio_layout.addWidget(QLabel("Read/Write Ratio:"))
         read_write_ratio_layout.addWidget(self.read_write_ratio_slider)
         read_write_ratio_layout.addWidget(self.read_write_ratio_label)
-        raid_performance_main_layout.addLayout(read_write_ratio_layout)
+        read_write_ratio_layout.addStretch(1)
+        raid_input_form_layout.addRow(read_write_ratio_layout)
 
-        # Calculate Button
+        # Action Buttons
         raid_button_layout = QHBoxLayout()
         self.calculate_performance_button = QPushButton("Calculate Performance")
+        self.clear_performance_button = QPushButton("Clear")
+        self.clear_performance_button.setFixedWidth(50)
         raid_button_layout.addStretch(1)
         raid_button_layout.addWidget(self.calculate_performance_button)
+        raid_button_layout.addWidget(self.clear_performance_button)
         raid_button_layout.addStretch(1)
         raid_performance_main_layout.addLayout(raid_button_layout)
 
-        # Output Fields (Bottom Section - Grid)
-        raid_output_grid = QGridLayout()
-        raid_output_grid.setSpacing(5)
+        # Output Selector Checkboxes
+        output_selector_layout = QHBoxLayout()
+        self.capacity_checkbox = QCheckBox("Usable Capacity")
+        self.read_iops_checkbox = QCheckBox("Read IOPS")
+        self.write_iops_checkbox = QCheckBox("Write IOPS")
+        self.total_iops_checkbox = QCheckBox("Total IOPS")
+        self.throughput_checkbox = QCheckBox("Est. Throughput")
+        for checkbox in [self.capacity_checkbox, self.read_iops_checkbox, self.write_iops_checkbox, self.total_iops_checkbox, self.throughput_checkbox]:
+            output_selector_layout.addWidget(checkbox)
+        output_selector_layout.addStretch(1)
+        raid_performance_main_layout.addLayout(output_selector_layout)
+
+        # Output Fields (Hidden by Default)
+        self.calculators_page_widget = QWidget()
+        calculators_layout = QVBoxLayout(self.calculators_page_widget)
+        calculators_layout.addSpacing(15)
+
+        # Camera Storage Calculator
+        camera_storage_group = QGroupBox("Camera Storage Calculator")
+        form_layout = QFormLayout(camera_storage_group)
+        form_layout.setContentsMargins(10, 15, 10, 10)
+        form_layout.setSpacing(5)
+
+        self.num_cameras_input = QLineEdit()
+        self.bandwidth_input = QLineEdit()
+        self.recording_hours_input = QLineEdit()
+        self.retention_days_input = QLineEdit()
+
+        form_layout.addRow("Number of Cameras:", self.num_cameras_input)
+        form_layout.addRow("Bandwidth (Mbps per camera):", self.bandwidth_input)
+        form_layout.addRow("Recording Hours per Day:", self.recording_hours_input)
+        form_layout.addRow("Retention Days:", self.retention_days_input)
+
+        storage_button_layout = QHBoxLayout()
+        self.calculate_storage_button = QPushButton("Calculate Storage")
+        self.clear_storage_button = QPushButton("Clear")
+        self.clear_storage_button.setFixedWidth(50)
+        storage_button_layout.addStretch(1)
+        storage_button_layout.addWidget(self.calculate_storage_button)
+        storage_button_layout.addWidget(self.clear_storage_button)
+        storage_button_layout.addStretch(1)
+        form_layout.addRow(storage_button_layout)
+
+        self.total_storage_output = QLineEdit()
+        self.total_storage_output.setReadOnly(True)
+        form_layout.addRow("Total Storage Required (TB):", self.total_storage_output)
+
+        calculators_layout.addWidget(camera_storage_group)
+
+        # RAID Performance Calculator
+        raid_performance_group = QGroupBox("RAID Performance Calculator")
+        self.raid_output_grid = QGridLayout() # This is the grid for the results
+        self.raid_output_grid.setSpacing(5)
+
+        raid_performance_main_layout = QVBoxLayout(raid_performance_group)
+        raid_performance_main_layout.setContentsMargins(10, 15, 10, 10)
+        raid_performance_main_layout.setSpacing(10)
+
+        # Input Fields (Top Section - QFormLayout)
+        raid_input_form_layout = QFormLayout()
+        raid_input_form_layout.setSpacing(5)
+        self.num_drives_input = QLineEdit()
+        self.single_drive_iops_input = QLineEdit()
+        self.single_drive_throughput_input = QLineEdit()
+        self.raid_level_combo = QComboBox()
+        self.raid_level_combo.addItems(["RAID 0", "RAID 1", "RAID 5", "RAID 6", "RAID 10"])
+
+        raid_input_form_layout.addRow("Number of Drives:", self.num_drives_input)
+        raid_input_form_layout.addRow("Single Drive IOPS:", self.single_drive_iops_input)
+        raid_input_form_layout.addRow("Single Drive Throughput (MB/s):", self.single_drive_throughput_input)
+        raid_input_form_layout.addRow("RAID Level:", self.raid_level_combo)
+        raid_performance_main_layout.addLayout(raid_input_form_layout)
+
+        # Read/Write Ratio Slider
+        read_write_ratio_layout = QHBoxLayout()
+        self.read_write_ratio_slider = QSlider(Qt.Horizontal)
+        self.read_write_ratio_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.read_write_ratio_label = QLabel()
+        read_write_ratio_layout.addWidget(QLabel("Read/Write Ratio:"))
+        read_write_ratio_layout.addWidget(self.read_write_ratio_slider)
+        read_write_ratio_layout.addWidget(self.read_write_ratio_label)
+        raid_input_form_layout.addRow(read_write_ratio_layout)
+
+        # Action Buttons
+        raid_button_layout = QHBoxLayout()
+        self.calculate_performance_button = QPushButton("Calculate Performance")
+        self.clear_performance_button = QPushButton("Clear")
+        self.clear_performance_button.setFixedWidth(50)
+        raid_button_layout.addStretch(1)
+        raid_button_layout.addWidget(self.calculate_performance_button)
+        raid_button_layout.addWidget(self.clear_performance_button)
+        raid_button_layout.addStretch(1)
+        raid_performance_main_layout.addLayout(raid_button_layout)
+
+        # Output Selector Checkboxes
+        output_selector_layout = QHBoxLayout()
+        self.capacity_checkbox = QCheckBox("Usable Capacity")
+        self.read_iops_checkbox = QCheckBox("Read IOPS")
+        self.write_iops_checkbox = QCheckBox("Write IOPS")
+        self.total_iops_checkbox = QCheckBox("Total IOPS")
+        self.throughput_checkbox = QCheckBox("Est. Throughput")
+        for checkbox in [self.capacity_checkbox, self.read_iops_checkbox, self.write_iops_checkbox, self.total_iops_checkbox, self.throughput_checkbox]:
+            output_selector_layout.addWidget(checkbox)
+        output_selector_layout.addStretch(1)
+        raid_performance_main_layout.addLayout(output_selector_layout)
+
+        # --- IMPORTANT: Re-create the output widgets that were missing ---
+        # These are the container widgets that were mistakenly removed.
+        self.capacity_output_widget = QWidget()
+        self.read_iops_output_widget = QWidget()
+        self.write_iops_output_widget = QWidget()
+        self.total_iops_output_widget = QWidget()
+        self.throughput_output_widget = QWidget()
+        
+        # Create the actual labels and line edits that go inside the grid
+        self.total_capacity_label = QLabel("Usable Capacity (Drives):")
         self.total_capacity_output = QLineEdit()
-        self.total_capacity_output.setReadOnly(True)
+        self.read_iops_label = QLabel("Read IOPS:")
         self.read_iops_output = QLineEdit()
-        self.read_iops_output.setReadOnly(True)
+        self.write_iops_label = QLabel("Write IOPS:")
         self.write_iops_output = QLineEdit()
-        self.write_iops_output.setReadOnly(True)
+        self.total_iops_label = QLabel("Total IOPS:")
         self.total_iops_output = QLineEdit()
-        self.total_iops_output.setReadOnly(True)
+        self.estimated_throughput_label = QLabel("Est. Throughput (MB/s):")
         self.estimated_throughput_output = QLineEdit()
-        self.estimated_throughput_output.setReadOnly(True)
-        raid_output_grid.addWidget(QLabel("Usable Capacity (Drives):"), 0, 0)
-        raid_output_grid.addWidget(self.total_capacity_output, 0, 1)
-        raid_output_grid.addWidget(QLabel("Read IOPS:"), 1, 0)
-        raid_output_grid.addWidget(self.read_iops_output, 1, 1)
-        raid_output_grid.addWidget(QLabel("Write IOPS:"), 2, 0)
-        raid_output_grid.addWidget(self.write_iops_output, 2, 1)
-        raid_output_grid.addWidget(QLabel("Total IOPS:"), 3, 0)
-        raid_output_grid.addWidget(self.total_iops_output, 3, 1)
-        raid_output_grid.addWidget(QLabel("Estimated Throughput (MB/s):"), 4, 0)
-        raid_output_grid.addWidget(self.estimated_throughput_output, 4, 1)
-        raid_performance_main_layout.addLayout(raid_output_grid)
+
+        # Add the (currently empty) grid layout to the main layout for the calculator
+        raid_performance_main_layout.addLayout(self.raid_output_grid)
 
         calculators_layout.addWidget(raid_performance_group)
+        calculators_layout.addSpacing(20)
         calculators_layout.addStretch(1)
 
         self.tab_widget.addTab(self.calculators_page_widget, "Calculators")
@@ -1544,9 +1641,64 @@ class PingMonitorWindow(QMainWindow):
         self.manage_alerts_button.clicked.connect(self.open_alert_dialog)
         self.alert_manager.alert_triggered.connect(self.handle_alert)
         self.calculate_storage_button.clicked.connect(self._calculate_camera_storage)
+        self.clear_storage_button.clicked.connect(self._clear_storage_calculator)
         self.calculate_performance_button.clicked.connect(self._calculate_raid_performance)
+        self.clear_performance_button.clicked.connect(self._clear_raid_calculator)
         self.read_write_ratio_slider.valueChanged.connect(self._update_ratio_label)
 
+        self.raid_output_widgets = {
+            "capacity": (self.capacity_checkbox, self.capacity_output_widget),
+            "read_iops": (self.read_iops_checkbox, self.read_iops_output_widget),
+            "write_iops": (self.write_iops_checkbox, self.write_iops_output_widget),
+            "total_iops": (self.total_iops_checkbox, self.total_iops_output_widget),
+            "throughput": (self.throughput_checkbox, self.throughput_output_widget),
+        }
+
+        # Now, connect the signals, passing the correct STRING KEY to the function.
+        self.capacity_checkbox.stateChanged.connect(lambda state, name="capacity": self._toggle_output_visibility(name, state))
+        self.read_iops_checkbox.stateChanged.connect(lambda state, name="read_iops": self._toggle_output_visibility(name, state))
+        self.write_iops_checkbox.stateChanged.connect(lambda state, name="write_iops": self._toggle_output_visibility(name, state))
+        self.total_iops_checkbox.stateChanged.connect(lambda state, name="total_iops": self._toggle_output_visibility(name, state))
+        self.throughput_checkbox.stateChanged.connect(lambda state, name="throughput": self._toggle_output_visibility(name, state))
+
+    def _toggle_output_visibility(self, name, state):
+        # We no longer need to find the widget, just update the grid
+        self._update_raid_output_grid()
+
+    def _update_raid_output_grid(self):
+        # Clear the grid completely
+        while self.raid_output_grid.count():
+            item = self.raid_output_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+        # This dictionary now just maps checkboxes to their widgets
+        # We define it here so the method is self-contained
+        widgets_to_place = {
+            "capacity": (self.capacity_checkbox, self.total_capacity_label, self.total_capacity_output),
+            "read_iops": (self.read_iops_checkbox, self.read_iops_label, self.read_iops_output),
+            "write_iops": (self.write_iops_checkbox, self.write_iops_label, self.write_iops_output),
+            "total_iops": (self.total_iops_checkbox, self.total_iops_label, self.total_iops_output),
+            "throughput": (self.throughput_checkbox, self.estimated_throughput_label, self.estimated_throughput_output),
+        }
+
+        row, col = 0, 0
+        # Iterate through our defined metrics to keep the order
+        for metric_name in ["capacity", "read_iops", "write_iops", "total_iops", "throughput"]:
+            checkbox, label, line_edit = widgets_to_place[metric_name]
+
+            if checkbox.isChecked():
+                # Add the label and its text field to the grid
+                self.raid_output_grid.addWidget(label, row, col)
+                self.raid_output_grid.addWidget(line_edit, row, col + 1)
+                
+                # Update column index. We want 2 pairs per row (4 columns total).
+                col += 2
+                if col >= 4:
+                    col = 0
+                    row += 1
+                    
     def _setup_raid_calculator(self):
         self.read_write_ratio_slider.setRange(0, 100)
         self.read_write_ratio_slider.setValue(50)
@@ -1627,6 +1779,23 @@ class PingMonitorWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers in all fields.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+
+    def _clear_storage_calculator(self):
+        self.num_cameras_input.clear()
+        self.bandwidth_input.clear()
+        self.recording_hours_input.clear()
+        self.retention_days_input.clear()
+        self.total_storage_output.clear()
+
+    def _clear_raid_calculator(self):
+        self.num_drives_input.clear()
+        self.single_drive_iops_input.clear()
+        self.single_drive_throughput_input.clear()
+        self.total_capacity_output.clear()
+        self.read_iops_output.clear()
+        self.write_iops_output.clear()
+        self.total_iops_output.clear()
+        self.estimated_throughput_output.clear()
 
     def _update_ratio_label(self, value):
         read_ratio = value
@@ -3251,7 +3420,7 @@ class PingMonitorWindow(QMainWindow):
 
         self.ip_scan_worker.host_found.connect(self.add_host_to_table)
         self.ip_scan_worker.finished.connect(self._ip_scan_finished)
-        self.ip_scan_worker.progress_updated.connect(self.ip_scan_progress_bar.setValue)
+        self.ip_scan_worker.progress_updated.connect(self.update_ip_scan_progress)
 
         self.ip_scan_thread.started.connect(self.ip_scan_worker.run)
         self.ip_scan_thread.start()
@@ -3284,11 +3453,10 @@ class PingMonitorWindow(QMainWindow):
             self.ip_scan_thread.quit()
             self.ip_scan_thread.wait()
 
-
     def update_ip_scan_progress(self, current, total):
         if total > 0:
             progress = int((current / total) * 100)
-            self.progress_bar.setValue(progress)
+            self.ip_scan_progress_bar.setValue(progress)
 
     def open_alert_dialog(self):
         dialog = AlertsConfigurationDialog(self.alert_manager, self)
@@ -3795,7 +3963,7 @@ class IpScanWorker(QObject):
         # It may download the vendor list on first run.
         try:
             self.mac_lookup = MacLookup()
-            # self.mac_lookup.update_vendors() # Uncomment to force update
+            self.mac_lookup.update_vendors() # Uncomment to force update
         except Exception as e:
             print(f"Could not initialize MacLookup: {e}")
             self.mac_lookup = None
