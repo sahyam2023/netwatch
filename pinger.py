@@ -891,6 +891,7 @@ class PingMonitorWindow(QMainWindow):
         self.update_status("Idle", "idle")
         self.check_admin_privileges_on_start()
         self.check_for_nmap()
+        self._setup_raid_calculator()
 
     def check_for_nmap(self):
         try:
@@ -1417,6 +1418,95 @@ class PingMonitorWindow(QMainWindow):
         self.results_view.customContextMenuRequested.connect(self.show_results_context_menu)
         self.manage_alerts_button.clicked.connect(self.open_alert_dialog)
         self.alert_manager.alert_triggered.connect(self.handle_alert)
+        self.calculate_storage_button.clicked.connect(self._calculate_camera_storage)
+        self.calculate_performance_button.clicked.connect(self._calculate_raid_performance)
+        self.read_write_ratio_slider.valueChanged.connect(self._update_ratio_label)
+
+    def _setup_raid_calculator(self):
+        self.read_write_ratio_slider.setRange(0, 100)
+        self.read_write_ratio_slider.setValue(50)
+        self._update_ratio_label(50)
+
+    def _calculate_camera_storage(self):
+        try:
+            num_cameras = int(self.num_cameras_input.text())
+            bandwidth = float(self.bandwidth_input.text())
+            recording_hours = float(self.recording_hours_input.text())
+            retention_days = int(self.retention_days_input.text())
+
+            megabits_per_second = bandwidth
+            megabytes_per_second = megabits_per_second / 8
+            megabytes_per_day_per_camera = megabytes_per_second * 60 * 60 * recording_hours
+            total_megabytes = megabytes_per_day_per_camera * num_cameras * retention_days
+            total_terabytes = total_megabytes / (1000 * 1000)
+
+            final_result = math.ceil(total_terabytes)
+            self.total_storage_output.setText(str(final_result))
+
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers in all fields.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+
+    def _calculate_raid_performance(self):
+        try:
+            num_drives = int(self.num_drives_input.text())
+            single_drive_iops = int(self.single_drive_iops_input.text())
+            single_drive_throughput = int(self.single_drive_throughput_input.text())
+            raid_level = self.raid_level_combo.currentText()
+            read_ratio = self.read_write_ratio_slider.value() / 100.0
+            write_ratio = 1.0 - read_ratio
+
+            read_iops = 0
+            write_iops = 0
+            total_iops = 0
+            usable_capacity = 0
+            estimated_throughput = 0
+
+            if raid_level == "RAID 0":
+                read_iops = num_drives * single_drive_iops
+                write_iops = num_drives * single_drive_iops
+                usable_capacity = num_drives # Assuming drive capacity is 1 for simplicity, as it's not an input
+                estimated_throughput = num_drives * single_drive_throughput
+            elif raid_level == "RAID 1":
+                read_iops = num_drives * single_drive_iops
+                write_iops = single_drive_iops
+                usable_capacity = 1 # Assuming drive capacity is 1 for simplicity
+                estimated_throughput = single_drive_throughput
+            elif raid_level == "RAID 5":
+                read_iops = (num_drives - 1) * single_drive_iops
+                write_iops = (num_drives * single_drive_iops) / 4
+                usable_capacity = num_drives - 1 # Assuming drive capacity is 1 for simplicity
+            elif raid_level == "RAID 6":
+                read_iops = (num_drives - 2) * single_drive_iops
+                write_iops = (num_drives * single_drive_iops) / 6
+                usable_capacity = num_drives - 2 # Assuming drive capacity is 1 for simplicity
+            elif raid_level == "RAID 10":
+                read_iops = num_drives * single_drive_iops
+                write_iops = (num_drives * single_drive_iops) / 2
+                usable_capacity = num_drives / 2 # Assuming drive capacity is 1 for simplicity
+
+            if raid_level not in ["RAID 0", "RAID 1"]:
+                 estimated_throughput = (read_iops * read_ratio + write_iops * write_ratio) * (single_drive_throughput / single_drive_iops)
+
+
+            total_iops = (read_iops * read_ratio) + (write_iops * write_ratio)
+
+            self.total_capacity_output.setText(f"{usable_capacity} (Drives)")
+            self.read_iops_output.setText(f"{int(read_iops)}")
+            self.write_iops_output.setText(f"{int(write_iops)}")
+            self.total_iops_output.setText(f"{int(total_iops)}")
+            self.estimated_throughput_output.setText(f"{int(estimated_throughput)}")
+
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers in all fields.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+
+    def _update_ratio_label(self, value):
+        read_ratio = value
+        write_ratio = 100 - read_ratio
+        self.read_write_ratio_label.setText(f"{read_ratio}% Read / {write_ratio}% Write")
 
     def show_save_log_menu(self):
         menu = QMenu(self)
