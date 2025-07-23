@@ -28,7 +28,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='PingWatch',
+    name='NetWatch',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

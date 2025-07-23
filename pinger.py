@@ -792,6 +792,7 @@ class DiskBenchmarkWorker(QObject):
     def stop(self):
         self._is_running = False
 
+    @Slot()
     def run(self):
         temp_file_path = os.path.join(self.target_path, f"benchmark_temp_{os.getpid()}_{time.time()}.bin")
         try:
@@ -805,100 +806,83 @@ class DiskBenchmarkWorker(QObject):
             
             total_bytes = self.file_size_gb * 1024 * 1024 * 1024
             
-            # Create Test File
+            # --- Test File Creation (More efficient) ---
             self.progress_update.emit(0, "Creating test file...")
+            chunk_size = 4 * 1024 * 1024  # 4MB buffer for writing
+            buffer = os.urandom(chunk_size)
             with open(temp_file_path, 'wb') as f:
-                if sys.platform == 'win32':
-                    f.truncate(total_bytes)
-                
-                chunk_size = 4 * 1024 * 1024  # 4MB
-                buffer = os.urandom(chunk_size)
                 bytes_written = 0
                 while bytes_written < total_bytes:
-                    if not self._is_running:
-                        return
+                    if not self._is_running: return
                     f.write(buffer)
                     bytes_written += chunk_size
-                    f.flush()
-                    os.fsync(f.fileno())
-
-            # Sequential Read Test
-            if "Sequential Read" in self.test_types:
+            
+            # --- Sequential Read Test ---
+            if "Sequential Read" in self.test_types and self._is_running:
                 self.progress_update.emit(25, "Running Sequential Read...")
+                start_time = time.perf_counter()
                 with open(temp_file_path, 'rb') as f:
-                    start_time = time.perf_counter()
-                    f.seek(0)
                     bytes_read = 0
                     while bytes_read < total_bytes:
-                        if not self._is_running:
-                            return
+                        if not self._is_running: return
                         f.read(chunk_size)
                         bytes_read += chunk_size
-                    end_time = time.perf_counter()
-                    time_taken = end_time - start_time
-                    mbps = total_bytes / time_taken / (1024 * 1024)
-                    self.result_ready.emit("Sequential Read", "-", mbps, 0)
+                end_time = time.perf_counter()
+                time_taken = end_time - start_time
+                mbps = total_bytes / time_taken / (1024 * 1024) if time_taken > 0 else 0
+                self.result_ready.emit("Sequential Read", "-", mbps, 0)
             
-            # Sequential Write Test
-            if "Sequential Write" in self.test_types:
+            # --- Sequential Write Test ---
+            if "Sequential Write" in self.test_types and self._is_running:
                 self.progress_update.emit(50, "Running Sequential Write...")
                 start_time = time.perf_counter()
                 with open(temp_file_path, 'wb') as f:
-                    if sys.platform == 'win32':
-                        f.truncate(total_bytes)
                     bytes_written = 0
                     while bytes_written < total_bytes:
-                        if not self._is_running:
-                            return
+                        if not self._is_running: return
                         f.write(buffer)
                         bytes_written += chunk_size
-                        f.flush()
-                        os.fsync(f.fileno())
                 end_time = time.perf_counter()
                 time_taken = end_time - start_time
-                mbps = total_bytes / time_taken / (1024 * 1024)
+                mbps = total_bytes / time_taken / (1024 * 1024) if time_taken > 0 else 0
                 self.result_ready.emit("Sequential Write", "-", mbps, 0)
 
-            # Random Read Test
-            if "Random Read" in self.test_types:
+            # --- Random Read Test ---
+            if "Random Read" in self.test_types and self._is_running:
                 self.progress_update.emit(75, "Running Random Read...")
                 block_size = self.block_size_kb * 1024
                 num_iterations = total_bytes // block_size
-                random.seed(time.time())
                 start_time = time.perf_counter()
                 with open(temp_file_path, 'rb') as f:
                     for _ in range(num_iterations):
-                        if not self._is_running:
-                            return
+                        if not self._is_running: return
                         offset = random.randint(0, total_bytes - block_size)
                         f.seek(offset)
                         f.read(block_size)
                 end_time = time.perf_counter()
                 time_taken = end_time - start_time
-                iops = num_iterations / time_taken
-                mbps = total_bytes / time_taken / (1024 * 1024)
+                iops = num_iterations / time_taken if time_taken > 0 else 0
+                mbps = (num_iterations * block_size) / time_taken / (1024*1024) if time_taken > 0 else 0
                 self.result_ready.emit("Random Read", f"{self.block_size_kb} KB", mbps, int(iops))
 
-            # Random Write Test
-            if "Random Write" in self.test_types:
+            # --- Random Write Test (CORRECTED LOGIC) ---
+            if "Random Write" in self.test_types and self._is_running:
                 self.progress_update.emit(90, "Running Random Write...")
                 block_size = self.block_size_kb * 1024
                 num_iterations = total_bytes // block_size
-                random.seed(time.time())
+                random_buffer = os.urandom(block_size)
                 start_time = time.perf_counter()
                 with open(temp_file_path, 'r+b') as f:
                     for _ in range(num_iterations):
-                        if not self._is_running:
-                            return
+                        if not self._is_running: return
                         offset = random.randint(0, total_bytes - block_size)
                         f.seek(offset)
-                        f.write(os.urandom(block_size))
-                        f.flush()
-                        os.fsync(f.fileno())
+                        f.write(random_buffer)
+                    # We removed f.flush() and os.fsync() from the loop
                 end_time = time.perf_counter()
                 time_taken = end_time - start_time
-                iops = num_iterations / time_taken
-                mbps = total_bytes / time_taken / (1024*1024)
+                iops = num_iterations / time_taken if time_taken > 0 else 0
+                mbps = (num_iterations * block_size) / time_taken / (1024*1024) if time_taken > 0 else 0
                 self.result_ready.emit("Random Write", f"{self.block_size_kb} KB", mbps, int(iops))
 
         except Exception as e:
@@ -909,7 +893,8 @@ class DiskBenchmarkWorker(QObject):
                     os.remove(temp_file_path)
                 except OSError as e:
                     self.error_occurred.emit("Cleanup Error", f"Failed to remove temporary file: {e}")
-            self.progress_update.emit(100, "Benchmark complete. Cleaning up...")
+            if self._is_running: # Only show 'complete' if not stopped by user
+                self.progress_update.emit(100, "Benchmark complete. Cleaning up...")
             self.finished.emit()
 
 class AnimatedLabel(QLabel):
@@ -930,7 +915,7 @@ class PingMonitorWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PingWatch")
+        self.setWindowTitle("NetWatch")
         self.setMinimumSize(850, 600) # Reduced minimum height
         self.resize(1200, 700) 
         # Correct path finding for bundled app
@@ -1016,9 +1001,6 @@ class PingMonitorWindow(QMainWindow):
         self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self)
         self.tray_icon.show()
 
-        self.disk_benchmark_worker = None
-        self.disk_benchmark_thread = None
-
         # Define the full path to the sound file
         alert_sound_path = os.path.join(base_path, "alert.wav")
 
@@ -1037,6 +1019,30 @@ class PingMonitorWindow(QMainWindow):
         self.check_admin_privileges_on_start()
         self.check_for_nmap()
         self._setup_raid_calculator()
+    
+        # ADD THIS NEW METHOD TO THE PINGMONITORWINDOW CLASS
+    @Slot()
+    def _on_benchmark_shutdown_complete(self):
+        """
+        A single, safe slot that runs only AFTER the benchmark thread has fully terminated.
+        It handles all UI finalization and variable cleanup.
+        """
+        # Finalize UI state
+        self.disk_benchmark_start_button.setEnabled(True)
+        self.disk_benchmark_stop_button.setEnabled(False)
+        self.disk_benchmark_status_label.setText("Benchmark complete.")
+        # Ensure progress bar shows 100% on completion
+        self.disk_benchmark_progress_bar.setValue(100)
+
+        # Schedule the Qt objects for deletion
+        if self.disk_benchmark_worker:
+            self.disk_benchmark_worker.deleteLater()
+        if self.disk_benchmark_thread:
+            self.disk_benchmark_thread.deleteLater()
+
+        # Now it is finally safe to destroy the Python references
+        self.disk_benchmark_worker = None
+        self.disk_benchmark_thread = None
 
     def check_for_nmap(self):
         try:
@@ -1759,7 +1765,7 @@ class PingMonitorWindow(QMainWindow):
 
         target_control_layout.addWidget(QLabel("Random Block Size:"), 2, 0)
         self.disk_benchmark_block_size_combo = QComboBox()
-        self.disk_benchmark_block_size_combo.addItems(["4 KB", "64 KB", "1 MB"])
+        self.disk_benchmark_block_size_combo.addItems(["4 KB", "16 KB", "128 KB", "1 MB", "8 MB"])
         target_control_layout.addWidget(self.disk_benchmark_block_size_combo, 2, 1)
         
         test_types_layout = QHBoxLayout()
@@ -3733,11 +3739,14 @@ class PingMonitorWindow(QMainWindow):
         self.disk_benchmark_worker.progress_update.connect(self._update_disk_benchmark_progress)
         self.disk_benchmark_worker.result_ready.connect(self._add_disk_benchmark_result)
         self.disk_benchmark_worker.error_occurred.connect(self._handle_benchmark_error)
-        self.disk_benchmark_worker.finished.connect(self._finalize_disk_benchmark)
-        self.disk_benchmark_worker.finished.connect(self.disk_benchmark_thread.quit)
-        self.disk_benchmark_worker.finished.connect(self.disk_benchmark_worker.deleteLater)
-        self.disk_benchmark_thread.finished.connect(self.disk_benchmark_thread.deleteLater)
 
+        # 2. When the worker's task is done, its ONLY job is to tell the thread to quit
+        self.disk_benchmark_worker.finished.connect(self.disk_benchmark_thread.quit)
+
+        # 3. When the THREAD has fully finished, it triggers a single cleanup slot
+        self.disk_benchmark_thread.finished.connect(self._on_benchmark_shutdown_complete)
+
+        # 4. Start the thread
         self.disk_benchmark_thread.started.connect(self.disk_benchmark_worker.run)
         self.disk_benchmark_thread.start()
 
@@ -3746,17 +3755,10 @@ class PingMonitorWindow(QMainWindow):
             self.disk_benchmark_worker.stop()
         self.disk_benchmark_stop_button.setEnabled(False)
 
-    def _finalize_disk_benchmark(self):
-        self.disk_benchmark_start_button.setEnabled(True)
-        self.disk_benchmark_stop_button.setEnabled(False)
-        self.disk_benchmark_progress_bar.setValue(0)
-        self.disk_benchmark_status_label.setText("Idle")
-        self.disk_benchmark_worker = None
-        self.disk_benchmark_thread = None
+
 
     def _handle_benchmark_error(self, title, message):
         QMessageBox.critical(self, title, message)
-        self._finalize_disk_benchmark()
         
     def _update_disk_benchmark_progress(self, percentage, message):
         self.disk_benchmark_progress_bar.setValue(percentage)
@@ -4409,7 +4411,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     if sys.platform == 'win32':
-        myappid = u'Sams.PingWatchPro.PingMonitor.22' # Updated ID
+        myappid = u'Sams.NeTWatchPro.PingMonitor.22' # Updated ID
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except AttributeError: print("Warning: Could not set AppUserModelID (ctypes/shell32 issue?).")
