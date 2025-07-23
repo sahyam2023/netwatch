@@ -11,12 +11,13 @@ import os
 import json
 import requests
 import socket
+import math
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QProgressBar, QTreeView,
     QGroupBox, QFileDialog, QMessageBox, QHeaderView, QSplitter, QDialog, QTableWidget, QTableWidgetItem,
-    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView, QListWidget, QSystemTrayIcon
+    QCheckBox, QTabWidget, QGridLayout, QComboBox, QMenu, QAbstractItemView, QListWidget, QSystemTrayIcon, QSlider
 )
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from PyQt5.QtCore import (
@@ -1369,6 +1370,89 @@ class PingMonitorWindow(QMainWindow):
         ip_scanner_layout.addWidget(ip_scanner_results_group, 1)
 
         self.tab_widget.addTab(ip_scanner_page_widget, "IP Scanner")
+
+        # Create Calculators Page
+        calculators_page_widget = QWidget()
+        calculators_layout = QVBoxLayout(calculators_page_widget)
+        
+        # Camera Storage Calculator
+        camera_storage_group = QGroupBox("Camera Storage Calculator")
+        camera_storage_layout = QGridLayout(camera_storage_group)
+        
+        self.num_cameras_input = QLineEdit()
+        self.bandwidth_input = QLineEdit()
+        self.recording_hours_input = QLineEdit()
+        self.retention_days_input = QLineEdit()
+        self.total_storage_output = QLineEdit()
+        self.total_storage_output.setReadOnly(True)
+        self.calculate_storage_button = QPushButton("Calculate Storage")
+
+        camera_storage_layout.addWidget(QLabel("Number of Cameras:"), 0, 0)
+        camera_storage_layout.addWidget(self.num_cameras_input, 0, 1)
+        camera_storage_layout.addWidget(QLabel("Bandwidth (Mbps per camera):"), 1, 0)
+        camera_storage_layout.addWidget(self.bandwidth_input, 1, 1)
+        camera_storage_layout.addWidget(QLabel("Recording Hours per Day:"), 2, 0)
+        camera_storage_layout.addWidget(self.recording_hours_input, 2, 1)
+        camera_storage_layout.addWidget(QLabel("Retention Days:"), 3, 0)
+        camera_storage_layout.addWidget(self.retention_days_input, 3, 1)
+        camera_storage_layout.addWidget(self.calculate_storage_button, 4, 0, 1, 2)
+        camera_storage_layout.addWidget(QLabel("Total Storage Required (TB):"), 5, 0)
+        camera_storage_layout.addWidget(self.total_storage_output, 5, 1)
+        
+        calculators_layout.addWidget(camera_storage_group)
+
+        # RAID Performance Calculator
+        raid_performance_group = QGroupBox("RAID Performance Calculator")
+        raid_performance_layout = QGridLayout(raid_performance_group)
+
+        self.num_drives_input = QLineEdit()
+        self.single_drive_iops_input = QLineEdit()
+        self.single_drive_throughput_input = QLineEdit()
+        self.raid_level_combo = QComboBox()
+        self.raid_level_combo.addItems(["RAID 0", "RAID 1", "RAID 5", "RAID 6", "RAID 10"])
+        self.read_write_ratio_slider = QSlider(Qt.Horizontal)
+        self.read_write_ratio_label = QLabel()
+        self.calculate_performance_button = QPushButton("Calculate Performance")
+        
+        self.total_capacity_output = QLineEdit()
+        self.total_capacity_output.setReadOnly(True)
+        self.read_iops_output = QLineEdit()
+        self.read_iops_output.setReadOnly(True)
+        self.write_iops_output = QLineEdit()
+        self.write_iops_output.setReadOnly(True)
+        self.total_iops_output = QLineEdit()
+        self.total_iops_output.setReadOnly(True)
+        self.estimated_throughput_output = QLineEdit()
+        self.estimated_throughput_output.setReadOnly(True)
+
+        raid_performance_layout.addWidget(QLabel("Number of Drives:"), 0, 0)
+        raid_performance_layout.addWidget(self.num_drives_input, 0, 1)
+        raid_performance_layout.addWidget(QLabel("Single Drive IOPS:"), 1, 0)
+        raid_performance_layout.addWidget(self.single_drive_iops_input, 1, 1)
+        raid_performance_layout.addWidget(QLabel("Single Drive Throughput (MB/s):"), 2, 0)
+        raid_performance_layout.addWidget(self.single_drive_throughput_input, 2, 1)
+        raid_performance_layout.addWidget(QLabel("RAID Level:"), 3, 0)
+        raid_performance_layout.addWidget(self.raid_level_combo, 3, 1)
+        raid_performance_layout.addWidget(QLabel("Read/Write Ratio:"), 4, 0)
+        raid_performance_layout.addWidget(self.read_write_ratio_slider, 4, 1)
+        raid_performance_layout.addWidget(self.read_write_ratio_label, 5, 1)
+        raid_performance_layout.addWidget(self.calculate_performance_button, 6, 0, 1, 2)
+        
+        raid_performance_layout.addWidget(QLabel("Usable Capacity (Drives):"), 7, 0)
+        raid_performance_layout.addWidget(self.total_capacity_output, 7, 1)
+        raid_performance_layout.addWidget(QLabel("Read IOPS:"), 8, 0)
+        raid_performance_layout.addWidget(self.read_iops_output, 8, 1)
+        raid_performance_layout.addWidget(QLabel("Write IOPS:"), 9, 0)
+        raid_performance_layout.addWidget(self.write_iops_output, 9, 1)
+        raid_performance_layout.addWidget(QLabel("Total IOPS:"), 10, 0)
+        raid_performance_layout.addWidget(self.total_iops_output, 10, 1)
+        raid_performance_layout.addWidget(QLabel("Estimated Throughput (MB/s):"), 11, 0)
+        raid_performance_layout.addWidget(self.estimated_throughput_output, 11, 1)
+
+        calculators_layout.addWidget(raid_performance_group)
+        calculators_layout.addStretch(1)
+
+        self.tab_widget.addTab(calculators_page_widget, "Calculators")
 
         # Add the tab widget to the main layout
         main_layout.addWidget(self.tab_widget)
