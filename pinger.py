@@ -44,6 +44,8 @@ import scapy.utils
 from PyQt5.QtWidgets import QWhatsThis
 import traceback
 from mac_vendor_lookup import MacLookup
+import logging
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
 # --- Configuration ---
 MAX_IPS = 1500 # Increased limit
@@ -3651,6 +3653,7 @@ class PingMonitorWindow(QMainWindow):
 
         self.ip_scan_worker.host_found.connect(self.add_host_to_table)
         self.ip_scan_worker.finished.connect(self._ip_scan_finished)
+        # NEW and CORRECT line
         self.ip_scan_worker.progress_updated.connect(self.update_ip_scan_progress)
 
         self.ip_scan_thread.started.connect(self.ip_scan_worker.run)
@@ -3684,10 +3687,14 @@ class PingMonitorWindow(QMainWindow):
             self.ip_scan_thread.quit()
             self.ip_scan_thread.wait()
 
+    @Slot(int, int)
     def update_ip_scan_progress(self, current, total):
+        """Calculates the percentage and updates the IP scanner's progress bar."""
         if total > 0:
-            progress = int((current / total) * 100)
-            self.ip_scan_progress_bar.setValue(progress)
+            percentage = int((current / total) * 100)
+            self.ip_scan_progress_bar.setValue(percentage)
+        else:
+            self.ip_scan_progress_bar.setValue(0)
 
     def open_alert_dialog(self):
         dialog = AlertsConfigurationDialog(self.alert_manager, self)
@@ -4270,23 +4277,17 @@ class SinglePortScanWorker(QObject):
 
 
 class IpScanWorker(QObject):
-    host_found = Signal(dict) # Emits a dictionary for each live host
+    host_found = Signal(dict)
     finished = Signal()
-    progress_updated = Signal(int, int) # (current_ip, total_ips)
+    progress_updated = Signal(int, int)
 
     def __init__(self, target_range, timeout=1):
         super().__init__()
         self.target_range = target_range
         self.timeout = timeout
         self._is_running = True
-        # Initialize MacLookup. This can be done once.
-        # It may download the vendor list on first run.
-        try:
-            self.mac_lookup = MacLookup()
-            self.mac_lookup.update_vendors() # Uncomment to force update
-        except Exception as e:
-            print(f"Could not initialize MacLookup: {e}")
-            self.mac_lookup = None
+        # FIX: Do NOT initialize MacLookup here. It will be done in the background.
+        self.mac_lookup = None
 
     def stop(self):
         self._is_running = False
@@ -4306,7 +4307,6 @@ class IpScanWorker(QObject):
             return []
         return []
 
-
     def _get_hostname(self, ip_address):
         """Gets the hostname for a given IP address."""
         try:
@@ -4315,48 +4315,48 @@ class IpScanWorker(QObject):
             return "N/A"
 
     def _get_vendor(self, mac_address):
+        """Looks up the vendor from a MAC address."""
         if self.mac_lookup:
             try:
+                # This call is fast because the database is already loaded.
                 return self.mac_lookup.lookup(mac_address)
-            except Exception as e:
-                print(f"Could not look up vendor for {mac_address}: {e}")
+            except Exception:
                 return "Unknown"
         return "Lookup Disabled"
 
     @Slot()
     def run(self):
-        # 1. Parse the target_range into a list of IP addresses
+        # FIX: Initialize MacLookup here, on the worker thread. This is the key change.
+        # This slow operation will now happen in the background without freezing the GUI.
+        if self.mac_lookup is None:
+            try:
+                self.mac_lookup = MacLookup()
+            except Exception as e:
+                print(f"Could not initialize MacLookup in worker thread: {e}")
+
+        # The rest of the scanning logic remains the same.
         ip_list = self._parse_range(self.target_range)
         total_ips = len(ip_list)
 
-        # 2. Loop through each IP
         for i, ip in enumerate(ip_list):
             if not self._is_running:
                 break
             
             self.progress_updated.emit(i + 1, total_ips)
 
-            # 3. Use Scapy's srp function to send ARP requests
             try:
                 arp_request = scapy.all.ARP(pdst=ip)
                 broadcast = scapy.all.Ether(dst="ff:ff:ff:ff:ff:ff")
-                arp_request_broadcast = broadcast/arp_request
+                arp_request_broadcast = broadcast / arp_request
                 answered_list = scapy.all.srp(arp_request_broadcast, timeout=self.timeout, verbose=False)[0]
 
-                # 4. If a host replies (answered_list is not empty):
                 if answered_list:
                     for sent, received in answered_list:
-                        # Extract IP, MAC address from the reply
                         ip_address = received.psrc
                         mac_address = received.hwsrc
-
-                        # Try to get the hostname
                         hostname = self._get_hostname(ip_address)
-
-                        # Try to get the vendor from the MAC address
                         vendor = self._get_vendor(mac_address)
 
-                        # 5. Emit the results for the GUI to display
                         self.host_found.emit({
                             "ip": ip_address,
                             "hostname": hostname,
@@ -4367,9 +4367,7 @@ class IpScanWorker(QObject):
             except Exception as e:
                 print(f"Error scanning IP {ip}: {e}")
 
-
         self.finished.emit()
-
 
 class PacketCaptureWorker(QObject):
     packet_captured = Signal(object)
