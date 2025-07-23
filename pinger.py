@@ -12,6 +12,7 @@ import json
 import requests
 import socket
 import math
+import csv
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -770,7 +771,145 @@ class AlertManager(QObject):
                 # Remove it from the active set so it can trigger again later if the issue returns.
                 self.active_alerts.discard(alert_id)
                 # (Optional: you could emit a "condition cleared" signal here)
+import random
 # --- Animated Label Widget (No changes needed) ---
+class DiskBenchmarkWorker(QObject):
+    progress_update = Signal(int, str)
+    result_ready = Signal(str, str, float, int)
+    error_occurred = Signal(str, str)
+    finished = Signal()
+
+    def __init__(self, target_path, file_size_gb, block_size_kb, test_types):
+        super().__init__()
+        self.target_path = target_path
+        self.file_size_gb = file_size_gb
+        self.block_size_kb = block_size_kb
+        self.test_types = test_types
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
+
+    def run(self):
+        temp_file_path = os.path.join(self.target_path, f"benchmark_temp_{os.getpid()}_{time.time()}.bin")
+        try:
+            # Initial Validation
+            if not os.path.isdir(self.target_path):
+                self.error_occurred.emit("Validation Error", "Target path is not a valid directory.")
+                return
+            if not os.access(self.target_path, os.W_OK):
+                self.error_occurred.emit("Validation Error", "No write permissions for the target path.")
+                return
+            
+            total_bytes = self.file_size_gb * 1024 * 1024 * 1024
+            
+            # Create Test File
+            self.progress_update.emit(0, "Creating test file...")
+            with open(temp_file_path, 'wb') as f:
+                if sys.platform == 'win32':
+                    f.truncate(total_bytes)
+                
+                chunk_size = 4 * 1024 * 1024  # 4MB
+                buffer = os.urandom(chunk_size)
+                bytes_written = 0
+                while bytes_written < total_bytes:
+                    if not self._is_running:
+                        return
+                    f.write(buffer)
+                    bytes_written += chunk_size
+                    f.flush()
+                    os.fsync(f.fileno())
+
+            # Sequential Read Test
+            if "Sequential Read" in self.test_types:
+                self.progress_update.emit(25, "Running Sequential Read...")
+                with open(temp_file_path, 'rb') as f:
+                    start_time = time.perf_counter()
+                    f.seek(0)
+                    bytes_read = 0
+                    while bytes_read < total_bytes:
+                        if not self._is_running:
+                            return
+                        f.read(chunk_size)
+                        bytes_read += chunk_size
+                    end_time = time.perf_counter()
+                    time_taken = end_time - start_time
+                    mbps = total_bytes / time_taken / (1024 * 1024)
+                    self.result_ready.emit("Sequential Read", "-", mbps, 0)
+            
+            # Sequential Write Test
+            if "Sequential Write" in self.test_types:
+                self.progress_update.emit(50, "Running Sequential Write...")
+                start_time = time.perf_counter()
+                with open(temp_file_path, 'wb') as f:
+                    if sys.platform == 'win32':
+                        f.truncate(total_bytes)
+                    bytes_written = 0
+                    while bytes_written < total_bytes:
+                        if not self._is_running:
+                            return
+                        f.write(buffer)
+                        bytes_written += chunk_size
+                        f.flush()
+                        os.fsync(f.fileno())
+                end_time = time.perf_counter()
+                time_taken = end_time - start_time
+                mbps = total_bytes / time_taken / (1024 * 1024)
+                self.result_ready.emit("Sequential Write", "-", mbps, 0)
+
+            # Random Read Test
+            if "Random Read" in self.test_types:
+                self.progress_update.emit(75, "Running Random Read...")
+                block_size = self.block_size_kb * 1024
+                num_iterations = total_bytes // block_size
+                random.seed(time.time())
+                start_time = time.perf_counter()
+                with open(temp_file_path, 'rb') as f:
+                    for _ in range(num_iterations):
+                        if not self._is_running:
+                            return
+                        offset = random.randint(0, total_bytes - block_size)
+                        f.seek(offset)
+                        f.read(block_size)
+                end_time = time.perf_counter()
+                time_taken = end_time - start_time
+                iops = num_iterations / time_taken
+                mbps = total_bytes / time_taken / (1024 * 1024)
+                self.result_ready.emit("Random Read", f"{self.block_size_kb} KB", mbps, int(iops))
+
+            # Random Write Test
+            if "Random Write" in self.test_types:
+                self.progress_update.emit(90, "Running Random Write...")
+                block_size = self.block_size_kb * 1024
+                num_iterations = total_bytes // block_size
+                random.seed(time.time())
+                start_time = time.perf_counter()
+                with open(temp_file_path, 'r+b') as f:
+                    for _ in range(num_iterations):
+                        if not self._is_running:
+                            return
+                        offset = random.randint(0, total_bytes - block_size)
+                        f.seek(offset)
+                        f.write(os.urandom(block_size))
+                        f.flush()
+                        os.fsync(f.fileno())
+                end_time = time.perf_counter()
+                time_taken = end_time - start_time
+                iops = num_iterations / time_taken
+                mbps = total_bytes / time_taken / (1024*1024)
+                self.result_ready.emit("Random Write", f"{self.block_size_kb} KB", mbps, int(iops))
+
+        except Exception as e:
+            self.error_occurred.emit("Benchmark Error", str(e))
+        finally:
+            if os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError as e:
+                    self.error_occurred.emit("Cleanup Error", f"Failed to remove temporary file: {e}")
+            self.progress_update.emit(100, "Benchmark complete. Cleaning up...")
+            self.finished.emit()
+
 class AnimatedLabel(QLabel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -874,6 +1013,9 @@ class PingMonitorWindow(QMainWindow):
         self.alert_manager = AlertManager(self)
         self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self)
         self.tray_icon.show()
+
+        self.disk_benchmark_worker = None
+        self.disk_benchmark_thread = None
 
         # Define the full path to the sound file
         alert_sound_path = os.path.join(base_path, "alert.wav")
@@ -1592,6 +1734,89 @@ class PingMonitorWindow(QMainWindow):
 
         self.tab_widget.addTab(self.calculators_page_widget, "Calculators")
 
+        # Create Disk Benchmark Page
+        disk_benchmark_page_widget = QWidget()
+        disk_benchmark_layout = QVBoxLayout(disk_benchmark_page_widget)
+        disk_benchmark_layout.setContentsMargins(10, 10, 10, 10)
+        disk_benchmark_layout.setSpacing(10)
+
+        # Target & Control Section
+        target_control_group = QGroupBox("Target & Control")
+        target_control_layout = QGridLayout(target_control_group)
+
+        target_control_layout.addWidget(QLabel("Target Path/Drive:"), 0, 0)
+        self.disk_benchmark_path_input = QLineEdit()
+        target_control_layout.addWidget(self.disk_benchmark_path_input, 0, 1)
+        self.disk_benchmark_browse_button = QPushButton("Browse...")
+        target_control_layout.addWidget(self.disk_benchmark_browse_button, 0, 2)
+
+        target_control_layout.addWidget(QLabel("Test File Size:"), 1, 0)
+        self.disk_benchmark_file_size_combo = QComboBox()
+        self.disk_benchmark_file_size_combo.addItems(["1 GB", "5 GB", "10 GB"])
+        target_control_layout.addWidget(self.disk_benchmark_file_size_combo, 1, 1)
+
+        target_control_layout.addWidget(QLabel("Random Block Size:"), 2, 0)
+        self.disk_benchmark_block_size_combo = QComboBox()
+        self.disk_benchmark_block_size_combo.addItems(["4 KB", "64 KB", "1 MB"])
+        target_control_layout.addWidget(self.disk_benchmark_block_size_combo, 2, 1)
+        
+        test_types_layout = QHBoxLayout()
+        self.disk_benchmark_seq_read_checkbox = QCheckBox("Sequential Read")
+        self.disk_benchmark_seq_write_checkbox = QCheckBox("Sequential Write")
+        self.disk_benchmark_rand_read_checkbox = QCheckBox("Random Read")
+        self.disk_benchmark_rand_write_checkbox = QCheckBox("Random Write")
+        test_types_layout.addWidget(self.disk_benchmark_seq_read_checkbox)
+        test_types_layout.addWidget(self.disk_benchmark_seq_write_checkbox)
+        test_types_layout.addWidget(self.disk_benchmark_rand_read_checkbox)
+        test_types_layout.addWidget(self.disk_benchmark_rand_write_checkbox)
+        target_control_layout.addLayout(test_types_layout, 3, 1)
+
+        self.disk_benchmark_start_button = QPushButton("Start Benchmark")
+        self.disk_benchmark_stop_button = QPushButton("Stop Benchmark")
+        self.disk_benchmark_stop_button.setEnabled(False)
+        target_control_layout.addWidget(self.disk_benchmark_start_button, 4, 1)
+        target_control_layout.addWidget(self.disk_benchmark_stop_button, 4, 2)
+
+        warning_label = QLabel("Warning: Benchmarking creates and deletes large temporary files. Ensure sufficient free space and data backups. Run as Administrator for best results.")
+        warning_label.setStyleSheet("color: red;")
+        target_control_layout.addWidget(warning_label, 5, 0, 1, 3)
+
+        disk_benchmark_layout.addWidget(target_control_group)
+
+        # Progress & Status Section
+        progress_status_group = QGroupBox("Progress & Status")
+        progress_status_layout = QGridLayout(progress_status_group)
+
+        progress_status_layout.addWidget(QLabel("Overall Progress:"), 0, 0)
+        self.disk_benchmark_progress_bar = QProgressBar()
+        progress_status_layout.addWidget(self.disk_benchmark_progress_bar, 0, 1)
+
+        progress_status_layout.addWidget(QLabel("Current Test Status:"), 1, 0)
+        self.disk_benchmark_status_label = QLabel("Idle")
+        progress_status_layout.addWidget(self.disk_benchmark_status_label, 1, 1)
+        
+        disk_benchmark_layout.addWidget(progress_status_group)
+
+        # Results Display Section
+        results_display_group = QGroupBox("Results Display")
+        results_display_layout = QVBoxLayout(results_display_group)
+
+        self.disk_benchmark_results_table = QTableWidget()
+        self.disk_benchmark_results_table.setColumnCount(4)
+        self.disk_benchmark_results_table.setHorizontalHeaderLabels(["Test Type", "Block Size", "Speed (MB/s)", "IOPS"])
+        results_display_layout.addWidget(self.disk_benchmark_results_table)
+
+        results_buttons_layout = QHBoxLayout()
+        self.disk_benchmark_clear_button = QPushButton("Clear Results")
+        self.disk_benchmark_export_button = QPushButton("Export Results (CSV)")
+        results_buttons_layout.addWidget(self.disk_benchmark_clear_button)
+        results_buttons_layout.addWidget(self.disk_benchmark_export_button)
+        results_display_layout.addLayout(results_buttons_layout)
+
+        disk_benchmark_layout.addWidget(results_display_group)
+
+        self.tab_widget.addTab(disk_benchmark_page_widget, "Disk Benchmark")
+
         # Add the tab widget to the main layout
         main_layout.addWidget(self.tab_widget)
 
@@ -1645,6 +1870,12 @@ class PingMonitorWindow(QMainWindow):
         self.calculate_performance_button.clicked.connect(self._calculate_raid_performance)
         self.clear_performance_button.clicked.connect(self._clear_raid_calculator)
         self.read_write_ratio_slider.valueChanged.connect(self._update_ratio_label)
+
+        self.disk_benchmark_start_button.clicked.connect(self._start_disk_benchmark)
+        self.disk_benchmark_stop_button.clicked.connect(self._stop_disk_benchmark)
+        self.disk_benchmark_browse_button.clicked.connect(self._browse_disk_benchmark_path)
+        self.disk_benchmark_clear_button.clicked.connect(self._clear_disk_benchmark_results)
+        self.disk_benchmark_export_button.clicked.connect(self._export_disk_benchmark_results)
 
         self.raid_output_widgets = {
             "capacity": (self.capacity_checkbox, self.capacity_output_widget),
@@ -3466,6 +3697,95 @@ class PingMonitorWindow(QMainWindow):
         self.log_event(f"ALERT for {ip}: {rule_string}", "critical")
         self.tray_icon.showMessage("Ping Alert", f"Host: {ip}\n{rule_string}", QSystemTrayIcon.Warning, 5000)
         self.alert_sound.play()
+
+    def _start_disk_benchmark(self):
+        target_path = self.disk_benchmark_path_input.text()
+        file_size_str = self.disk_benchmark_file_size_combo.currentText()
+        block_size_str = self.disk_benchmark_block_size_combo.currentText()
+        
+        test_types = []
+        if self.disk_benchmark_seq_read_checkbox.isChecked():
+            test_types.append("Sequential Read")
+        if self.disk_benchmark_seq_write_checkbox.isChecked():
+            test_types.append("Sequential Write")
+        if self.disk_benchmark_rand_read_checkbox.isChecked():
+            test_types.append("Random Read")
+        if self.disk_benchmark_rand_write_checkbox.isChecked():
+            test_types.append("Random Write")
+
+        file_size_gb = int(file_size_str.split()[0])
+        block_size_kb = int(block_size_str.split()[0]) if "KB" in block_size_str else int(block_size_str.split()[0]) * 1024
+
+        self.disk_benchmark_start_button.setEnabled(False)
+        self.disk_benchmark_stop_button.setEnabled(True)
+
+        self.disk_benchmark_thread = QThread()
+        self.disk_benchmark_worker = DiskBenchmarkWorker(target_path, file_size_gb, block_size_kb, test_types)
+        self.disk_benchmark_worker.moveToThread(self.disk_benchmark_thread)
+
+        self.disk_benchmark_worker.progress_update.connect(self._update_disk_benchmark_progress)
+        self.disk_benchmark_worker.result_ready.connect(self._add_disk_benchmark_result)
+        self.disk_benchmark_worker.error_occurred.connect(self._handle_benchmark_error)
+        self.disk_benchmark_worker.finished.connect(self._finalize_disk_benchmark)
+        self.disk_benchmark_worker.finished.connect(self.disk_benchmark_thread.quit)
+        self.disk_benchmark_worker.finished.connect(self.disk_benchmark_worker.deleteLater)
+        self.disk_benchmark_thread.finished.connect(self.disk_benchmark_thread.deleteLater)
+
+        self.disk_benchmark_thread.started.connect(self.disk_benchmark_worker.run)
+        self.disk_benchmark_thread.start()
+
+    def _stop_disk_benchmark(self):
+        if self.disk_benchmark_worker:
+            self.disk_benchmark_worker.stop()
+        self.disk_benchmark_stop_button.setEnabled(False)
+
+    def _finalize_disk_benchmark(self):
+        self.disk_benchmark_start_button.setEnabled(True)
+        self.disk_benchmark_stop_button.setEnabled(False)
+        self.disk_benchmark_progress_bar.setValue(0)
+        self.disk_benchmark_status_label.setText("Idle")
+        self.disk_benchmark_worker = None
+        self.disk_benchmark_thread = None
+
+    def _handle_benchmark_error(self, title, message):
+        QMessageBox.critical(self, title, message)
+        self._finalize_disk_benchmark()
+        
+    def _update_disk_benchmark_progress(self, percentage, message):
+        self.disk_benchmark_progress_bar.setValue(percentage)
+        self.disk_benchmark_status_label.setText(message)
+
+    def _add_disk_benchmark_result(self, test_type, block_size, mbps, iops):
+        row_position = self.disk_benchmark_results_table.rowCount()
+        self.disk_benchmark_results_table.insertRow(row_position)
+        self.disk_benchmark_results_table.setItem(row_position, 0, QTableWidgetItem(test_type))
+        self.disk_benchmark_results_table.setItem(row_position, 1, QTableWidgetItem(block_size))
+        self.disk_benchmark_results_table.setItem(row_position, 2, QTableWidgetItem(f"{mbps:.2f}"))
+        self.disk_benchmark_results_table.setItem(row_position, 3, QTableWidgetItem(str(iops)))
+
+    def _browse_disk_benchmark_path(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory")
+        if directory:
+            self.disk_benchmark_path_input.setText(directory)
+
+    def _clear_disk_benchmark_results(self):
+        self.disk_benchmark_results_table.setRowCount(0)
+
+    def _export_disk_benchmark_results(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "", "CSV Files (*.csv)")
+        if path:
+            with open(path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([self.disk_benchmark_results_table.horizontalHeaderItem(i).text() for i in range(self.disk_benchmark_results_table.columnCount())])
+                for row in range(self.disk_benchmark_results_table.rowCount()):
+                    row_data = []
+                    for column in range(self.disk_benchmark_results_table.columnCount()):
+                        item = self.disk_benchmark_results_table.item(row, column)
+                        if item is not None:
+                            row_data.append(item.text())
+                        else:
+                            row_data.append('')
+                    writer.writerow(row_data)
 
 class AlertsConfigurationDialog(QDialog):
     def __init__(self, alert_manager, parent=None):
