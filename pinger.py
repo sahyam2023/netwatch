@@ -13,6 +13,7 @@ import requests
 import socket
 import math
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -781,22 +782,72 @@ class DiskBenchmarkWorker(QObject):
     error_occurred = Signal(str, str)
     finished = Signal()
 
-    def __init__(self, target_path, file_size_gb, block_size_kb, test_types):
+    def __init__(self, target_path, file_size_gb, block_size_kb, test_types, num_threads):
         super().__init__()
         self.target_path = target_path
         self.file_size_gb = file_size_gb
         self.block_size_kb = block_size_kb
         self.test_types = test_types
+        self.num_threads = max(1, num_threads) # Ensure at least 1 thread
         self._is_running = True
+        self.temp_file_path = os.path.join(self.target_path, f"benchmark_temp_{os.getpid()}_{time.time()}.bin")
 
     def stop(self):
         self._is_running = False
 
+# Add these methods inside DiskBenchmarkWorker class
+    def _perform_sequential_read_chunk(self, file_path, offset, size):
+        try:
+            with open(file_path, 'rb') as f:
+                f.seek(offset)
+                f.read(size)
+            return True # Indicate success
+        except Exception as e:
+            print(f"Error in sequential read chunk: {e}")
+            return False
+
+    def _perform_sequential_write_chunk(self, file_path, offset, size, buffer_data):
+        try:
+            with open(file_path, 'r+b') as f: # r+b to modify existing file
+                f.seek(offset)
+                f.write(buffer_data)
+                f.flush()
+                os.fsync(f.fileno()) # Critical for accurate write benchmarks
+            return True
+        except Exception as e:
+            print(f"Error in sequential write chunk: {e}")
+            return False
+
+    def _perform_random_read_chunk(self, file_path, total_bytes, block_size):
+        try:
+            offset = random.randint(0, total_bytes - block_size)
+            with open(file_path, 'rb') as f:
+                f.seek(offset)
+                f.read(block_size)
+            return True
+        except Exception as e:
+            print(f"Error in random read chunk: {e}")
+            return False
+
+    def _perform_random_write_chunk(self, file_path, total_bytes, block_size, random_buffer):
+        try:
+            offset = random.randint(0, total_bytes - block_size)
+            with open(file_path, 'r+b') as f: # r+b to modify existing file
+                f.seek(offset)
+                f.write(random_buffer)
+                f.flush()
+                os.fsync(f.fileno()) # Critical for accurate write benchmarks
+            return True
+        except Exception as e:
+            print(f"Error in random write chunk: {e}")
+            return False
+
     @Slot()
     def run(self):
-        temp_file_path = os.path.join(self.target_path, f"benchmark_temp_{os.getpid()}_{time.time()}.bin")
+        # Use self.temp_file_path consistently
+        temp_file_path = self.temp_file_path 
+        
         try:
-            # Initial Validation
             if not os.path.isdir(self.target_path):
                 self.error_occurred.emit("Validation Error", "Target path is not a valid directory.")
                 return
@@ -805,96 +856,153 @@ class DiskBenchmarkWorker(QObject):
                 return
             
             total_bytes = self.file_size_gb * 1024 * 1024 * 1024
+            chunk_size_for_creation = 4 * 1024 * 1024 # 4MB for efficient file creation
             
-            # --- Test File Creation (More efficient) ---
+            # --- Test File Creation ---
             self.progress_update.emit(0, "Creating test file...")
-            chunk_size = 4 * 1024 * 1024  # 4MB buffer for writing
-            buffer = os.urandom(chunk_size)
+            buffer = os.urandom(chunk_size_for_creation)
             with open(temp_file_path, 'wb') as f:
                 bytes_written = 0
                 while bytes_written < total_bytes:
                     if not self._is_running: return
                     f.write(buffer)
-                    bytes_written += chunk_size
+                    bytes_written += chunk_size_for_creation
             
-            # --- Sequential Read Test ---
-            if "Sequential Read" in self.test_types and self._is_running:
-                self.progress_update.emit(25, "Running Sequential Read...")
-                start_time = time.perf_counter()
-                with open(temp_file_path, 'rb') as f:
-                    bytes_read = 0
-                    while bytes_read < total_bytes:
-                        if not self._is_running: return
-                        f.read(chunk_size)
-                        bytes_read += chunk_size
-                end_time = time.perf_counter()
-                time_taken = end_time - start_time
-                mbps = total_bytes / time_taken / (1024 * 1024) if time_taken > 0 else 0
-                self.result_ready.emit("Sequential Read", "-", mbps, 0)
-            
-            # --- Sequential Write Test ---
-            if "Sequential Write" in self.test_types and self._is_running:
-                self.progress_update.emit(50, "Running Sequential Write...")
-                start_time = time.perf_counter()
-                with open(temp_file_path, 'wb') as f:
-                    bytes_written = 0
-                    while bytes_written < total_bytes:
-                        if not self._is_running: return
-                        f.write(buffer)
-                        bytes_written += chunk_size
-                end_time = time.perf_counter()
-                time_taken = end_time - start_time
-                mbps = total_bytes / time_taken / (1024 * 1024) if time_taken > 0 else 0
-                self.result_ready.emit("Sequential Write", "-", mbps, 0)
+            # --- Initialize ThreadPoolExecutor ---
+            # Max workers limits concurrent threads. This directly simulates QD.
+            with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+                
+                # --- Sequential Read Test ---
+                if "Sequential Read" in self.test_types and self._is_running:
+                    self.progress_update.emit(25, "Running Sequential Read...")
+                    # Divide file into chunks for multi-threaded sequential access
+                    seq_read_chunk_size = 1024 * 1024 # Use 1MB chunks for sequential
+                    num_seq_read_chunks = total_bytes // seq_read_chunk_size
+                    
+                    futures = []
+                    start_time = time.perf_counter()
+                    for i in range(num_seq_read_chunks):
+                        if not self._is_running: break
+                        offset = i * seq_read_chunk_size
+                        futures.append(executor.submit(self._perform_sequential_read_chunk, temp_file_path, offset, seq_read_chunk_size))
+                    
+                    # Wait for all futures to complete
+                    completed_count = 0
+                    for future in as_completed(futures):
+                        if not self._is_running: break # Stop if requested
+                        if not future.result(): # Check if the chunk read failed
+                            print("Warning: A sequential read chunk failed.")
+                        completed_count += 1
 
-            # --- Random Read Test ---
-            if "Random Read" in self.test_types and self._is_running:
-                self.progress_update.emit(75, "Running Random Read...")
-                block_size = self.block_size_kb * 1024
-                num_iterations = total_bytes // block_size
-                start_time = time.perf_counter()
-                with open(temp_file_path, 'rb') as f:
-                    for _ in range(num_iterations):
-                        if not self._is_running: return
-                        offset = random.randint(0, total_bytes - block_size)
-                        f.seek(offset)
-                        f.read(block_size)
-                end_time = time.perf_counter()
-                time_taken = end_time - start_time
-                iops = num_iterations / time_taken if time_taken > 0 else 0
-                mbps = (num_iterations * block_size) / time_taken / (1024*1024) if time_taken > 0 else 0
-                self.result_ready.emit("Random Read", f"{self.block_size_kb} KB", mbps, int(iops))
+                    end_time = time.perf_counter()
+                    time_taken = end_time - start_time
+                    mbps = total_bytes / time_taken / (1024 * 1024) if time_taken > 0 else 0
+                    self.result_ready.emit("Sequential Read", "-", mbps, 0)
+                
+                # --- Sequential Write Test ---
+                if "Sequential Write" in self.test_types and self._is_running:
+                    self.progress_update.emit(50, "Running Sequential Write...")
+                    seq_write_chunk_size = 1024 * 1024 # 1MB chunks
+                    num_seq_write_chunks = total_bytes // seq_write_chunk_size
+                    
+                    futures = []
+                    write_buffer_per_chunk = os.urandom(seq_write_chunk_size) # Re-use buffer for efficiency
+                    
+                    start_time = time.perf_counter()
+                    for i in range(num_seq_write_chunks):
+                        if not self._is_running: break
+                        offset = i * seq_write_chunk_size
+                        futures.append(executor.submit(self._perform_sequential_write_chunk, temp_file_path, offset, seq_write_chunk_size, write_buffer_per_chunk))
+                    
+                    completed_count = 0
+                    for future in as_completed(futures):
+                        if not self._is_running: break
+                        if not future.result():
+                            print("Warning: A sequential write chunk failed.")
+                        completed_count += 1
 
-            # --- Random Write Test (CORRECTED LOGIC) ---
-            if "Random Write" in self.test_types and self._is_running:
-                self.progress_update.emit(90, "Running Random Write...")
-                block_size = self.block_size_kb * 1024
-                num_iterations = total_bytes // block_size
-                random_buffer = os.urandom(block_size)
-                start_time = time.perf_counter()
-                with open(temp_file_path, 'r+b') as f:
-                    for _ in range(num_iterations):
-                        if not self._is_running: return
-                        offset = random.randint(0, total_bytes - block_size)
-                        f.seek(offset)
-                        f.write(random_buffer)
-                    # We removed f.flush() and os.fsync() from the loop
-                end_time = time.perf_counter()
-                time_taken = end_time - start_time
-                iops = num_iterations / time_taken if time_taken > 0 else 0
-                mbps = (num_iterations * block_size) / time_taken / (1024*1024) if time_taken > 0 else 0
-                self.result_ready.emit("Random Write", f"{self.block_size_kb} KB", mbps, int(iops))
+                    end_time = time.perf_counter()
+                    time_taken = end_time - start_time
+                    mbps = total_bytes / time_taken / (1024 * 1024) if time_taken > 0 else 0
+                    self.result_ready.emit("Sequential Write", "-", mbps, 0)
+
+                # --- Random Read Test ---
+                if "Random Read" in self.test_types and self._is_running:
+                    self.progress_update.emit(75, "Running Random Read...")
+                    block_size = self.block_size_kb * 1024
+                    num_iterations = total_bytes // block_size
+                    
+                    futures = []
+                    # Submit initial set of tasks up to num_threads
+                    for _ in range(min(self.num_threads, num_iterations)):
+                        if not self._is_running: break
+                        futures.append(executor.submit(self._perform_random_read_chunk, temp_file_path, total_bytes, block_size))
+                    
+                    start_time = time.perf_counter()
+                    completed_operations = 0
+                    # As tasks complete, submit new ones to maintain queue depth
+                    for future in as_completed(futures):
+                        if not self._is_running: break
+                        if not future.result():
+                            print("Warning: A random read chunk failed.")
+                        
+                        completed_operations += 1
+                        if completed_operations < num_iterations:
+                            # Submit next task to maintain parallelism
+                            futures.append(executor.submit(self._perform_random_read_chunk, temp_file_path, total_bytes, block_size))
+
+                    end_time = time.perf_counter()
+                    time_taken = end_time - start_time
+                    iops = completed_operations / time_taken if time_taken > 0 else 0
+                    mbps = (completed_operations * block_size) / time_taken / (1024*1024) if time_taken > 0 else 0
+                    self.result_ready.emit("Random Read", f"{self.block_size_kb} KB", mbps, int(iops))
+
+                # --- Random Write Test ---
+                if "Random Write" in self.test_types and self._is_running:
+                    self.progress_update.emit(90, "Running Random Write...")
+                    block_size = self.block_size_kb * 1024
+                    num_iterations = total_bytes // block_size
+                    
+                    futures = []
+                    # Pre-generate some random buffers if re-using is desired
+                    # For strict benchmarking, generate per-write or per-thread unique data
+                    random_buffer_for_writes = os.urandom(block_size) # Re-use for simplicity
+                    
+                    # Submit initial set of tasks up to num_threads
+                    for _ in range(min(self.num_threads, num_iterations)):
+                        if not self._is_running: break
+                        futures.append(executor.submit(self._perform_random_write_chunk, temp_file_path, total_bytes, block_size, random_buffer_for_writes))
+                    
+                    start_time = time.perf_counter()
+                    completed_operations = 0
+                    # As tasks complete, submit new ones to maintain queue depth
+                    for future in as_completed(futures):
+                        if not self._is_running: break
+                        if not future.result():
+                            print("Warning: A random write chunk failed.")
+                        
+                        completed_operations += 1
+                        if completed_operations < num_iterations:
+                            # Submit next task to maintain parallelism
+                            futures.append(executor.submit(self._perform_random_write_chunk, temp_file_path, total_bytes, block_size, random_buffer_for_writes))
+
+                    end_time = time.perf_counter()
+                    time_taken = end_time - start_time
+                    iops = completed_operations / time_taken if time_taken > 0 else 0
+                    mbps = (completed_operations * block_size) / time_taken / (1024*1024) if time_taken > 0 else 0
+                    self.result_ready.emit("Random Write", f"{self.block_size_kb} KB", mbps, int(iops))
 
         except Exception as e:
             self.error_occurred.emit("Benchmark Error", str(e))
         finally:
+            # Cleanup temp file
             if os.path.exists(temp_file_path):
                 try:
                     os.remove(temp_file_path)
                 except OSError as e:
                     self.error_occurred.emit("Cleanup Error", f"Failed to remove temporary file: {e}")
             if self._is_running: # Only show 'complete' if not stopped by user
-                self.progress_update.emit(100, "Benchmark complete. Cleaning up...")
+                self.progress_update.emit(100, "Benchmark complete.") # Changed message
             self.finished.emit()
 
 class AnimatedLabel(QLabel):
@@ -1598,6 +1706,13 @@ class PingMonitorWindow(QMainWindow):
         self.disk_benchmark_block_size_combo.addItems(["4 KB", "16 KB", "128 KB", "1 MB", "8 MB"])
         target_control_layout.addWidget(self.disk_benchmark_block_size_combo, 2, 1)
         
+        # Inside _init_ui, within the "Target & Control" group of the Disk Benchmark tab
+        target_control_layout.addWidget(QLabel("Threads/Queue Depth:"), 3, 0) # Adjust row/column as needed
+        self.disk_benchmark_threads_combo = QComboBox()
+        self.disk_benchmark_threads_combo.addItems(["1", "2", "4", "8", "16", "32"]) # Common QD values
+        self.disk_benchmark_threads_combo.setCurrentText("1") # Default to 1
+        target_control_layout.addWidget(self.disk_benchmark_threads_combo, 3, 1) # Adjust row/column
+        
         test_types_layout = QHBoxLayout()
         self.disk_benchmark_seq_read_checkbox = QCheckBox("Sequential Read")
         self.disk_benchmark_seq_write_checkbox = QCheckBox("Sequential Write")
@@ -1607,17 +1722,17 @@ class PingMonitorWindow(QMainWindow):
         test_types_layout.addWidget(self.disk_benchmark_seq_write_checkbox)
         test_types_layout.addWidget(self.disk_benchmark_rand_read_checkbox)
         test_types_layout.addWidget(self.disk_benchmark_rand_write_checkbox)
-        target_control_layout.addLayout(test_types_layout, 3, 1)
+        target_control_layout.addLayout(test_types_layout, 4, 1, 1, 2) # Adjusted row/column/span
 
         self.disk_benchmark_start_button = QPushButton("Start Benchmark")
         self.disk_benchmark_stop_button = QPushButton("Stop Benchmark")
         self.disk_benchmark_stop_button.setEnabled(False)
-        target_control_layout.addWidget(self.disk_benchmark_start_button, 4, 1)
-        target_control_layout.addWidget(self.disk_benchmark_stop_button, 4, 2)
+        target_control_layout.addWidget(self.disk_benchmark_start_button, 5, 1)
+        target_control_layout.addWidget(self.disk_benchmark_stop_button, 5, 2)
 
         warning_label = QLabel("Warning: Benchmarking creates and deletes large temporary files. Ensure sufficient free space and data backups. Run as Administrator for best results.")
         warning_label.setStyleSheet("color: red;")
-        target_control_layout.addWidget(warning_label, 5, 0, 1, 3)
+        target_control_layout.addWidget(warning_label, 6, 0, 1, 3)
 
         disk_benchmark_layout.addWidget(target_control_group)
 
@@ -3433,6 +3548,7 @@ class PingMonitorWindow(QMainWindow):
         target_path = self.disk_benchmark_path_input.text()
         file_size_str = self.disk_benchmark_file_size_combo.currentText()
         block_size_str = self.disk_benchmark_block_size_combo.currentText()
+        num_threads = int(self.disk_benchmark_threads_combo.currentText()) # Get num_threads
         
         test_types = []
         if self.disk_benchmark_seq_read_checkbox.isChecked():
@@ -3445,13 +3561,22 @@ class PingMonitorWindow(QMainWindow):
             test_types.append("Random Write")
 
         file_size_gb = int(file_size_str.split()[0])
-        block_size_kb = int(block_size_str.split()[0]) if "KB" in block_size_str else int(block_size_str.split()[0]) * 1024
+        # block_size_kb already correctly parses KB/MB
+        block_size_kb_val = int(block_size_str.split()[0]) 
+        if "KB" in block_size_str:
+            block_size_kb = block_size_kb_val
+        elif "MB" in block_size_str:
+            block_size_kb = block_size_kb_val * 1024 # Convert MB to KB
+        else: # Default to KB if unit missing or unknown
+            block_size_kb = 4 # Or raise error/set default
+        
 
         self.disk_benchmark_start_button.setEnabled(False)
         self.disk_benchmark_stop_button.setEnabled(True)
 
         self.disk_benchmark_thread = QThread()
-        self.disk_benchmark_worker = DiskBenchmarkWorker(target_path, file_size_gb, block_size_kb, test_types)
+        # Pass the new num_threads parameter
+        self.disk_benchmark_worker = DiskBenchmarkWorker(target_path, file_size_gb, block_size_kb, test_types, num_threads)
         self.disk_benchmark_worker.moveToThread(self.disk_benchmark_thread)
 
         self.disk_benchmark_worker.progress_update.connect(self._update_disk_benchmark_progress)
