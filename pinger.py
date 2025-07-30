@@ -76,7 +76,7 @@ def is_admin():
 class RTSPServerManager(QObject):
     server_status_changed = Signal(str)
     video_stream_added = Signal(str, str)
-    video_stream_failed = Signal(str, str)
+    video_stream_failed = Signal(str, str) # We will now use this signal correctly
     manager_stopped = Signal()
 
     def __init__(self, mediamtx_path, mediamtx_config_path, ffmpeg_path, parent=None):
@@ -87,65 +87,52 @@ class RTSPServerManager(QObject):
 
         self.server_process = None
         self.video_processes = {}
+        # --- REMOVED: self.monitor_threads is no longer needed ---
 
     @Slot()
     def start_server(self):
-        # Check if the executable exists
         if not os.path.exists(self.mediamtx_path):
             self.server_status_changed.emit("Error: mediamtx.exe not found!")
             return
-
         try:
-            # Command now includes the explicit config file path
             command = [self.mediamtx_path, self.mediamtx_config_path]
-
-            # Use CREATE_NO_WINDOW on Windows to hide the console
             creation_flags = 0
             if sys.platform == 'win32':
                 creation_flags = subprocess.CREATE_NO_WINDOW
-
             self.server_process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=creation_flags
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creation_flags
             )
-            # A small delay to let the server initialize before we start pushing streams
             time.sleep(1)
             self.server_status_changed.emit("Running")
-
         except Exception as e:
             self.server_status_changed.emit(f"Error: {e}")
 
-    @Slot(str, str) # Accepts video_path and the local_ip
+    # --- REMOVED: The problematic _monitor_ffmpeg_process method is gone ---
+
+    @Slot(str, str)
     def add_video_stream(self, video_path, local_ip):
         if not self.server_process or not os.path.exists(self.ffmpeg_path):
             self.video_stream_failed.emit(os.path.basename(video_path), "Server or ffmpeg not running.")
             return
 
         stream_name = os.path.splitext(os.path.basename(video_path))[0].replace(" ", "_")
-
         command = [
-            self.ffmpeg_path,
-            '-re',
-            '-stream_loop', '-1',
-            '-i', video_path,
-            '-c', 'copy',
-            '-f', 'rtsp',
-            '-rtsp_transport', 'tcp',
+            self.ffmpeg_path, '-re', '-stream_loop', '-1', '-i', video_path,
+            '-c', 'copy', '-f', 'rtsp', '-rtsp_transport', 'tcp',
             f'rtsp://localhost:8554/{stream_name}'
         ]
 
         try:
-            # Use CREATE_NO_WINDOW on Windows to hide the console
             creation_flags = 0
             if sys.platform == 'win32':
                 creation_flags = subprocess.CREATE_NO_WINDOW
-
+            
+            # *** FIX: We now send stdout and stderr to DEVNULL to hide them ***
+            # This prevents the pipe buffers from filling up and blocking the process.
             ffmpeg_process = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=creation_flags
             )
             self.video_processes[video_path] = ffmpeg_process
@@ -159,13 +146,11 @@ class RTSPServerManager(QObject):
 
     @Slot()
     def stop_server(self):
-        # Stop all ffmpeg processes first
         for path, process in self.video_processes.items():
-            if process.poll() is None: # Check if process is still running
+            if process.poll() is None:
                 process.terminate()
         self.video_processes.clear()
 
-        # Stop the main mediamtx server
         if self.server_process and self.server_process.poll() is None:
             self.server_process.terminate()
             self.server_process = None
