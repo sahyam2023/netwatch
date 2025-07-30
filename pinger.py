@@ -13,6 +13,7 @@ import requests
 import socket
 import math
 import csv
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt5.QtWidgets import (
@@ -72,6 +73,105 @@ def is_admin():
         return False
 
 
+class RTSPServerManager(QObject):
+    server_status_changed = Signal(str)
+    video_stream_added = Signal(str, str)
+    video_stream_failed = Signal(str, str)
+    manager_stopped = Signal()
+
+    def __init__(self, mediamtx_path, mediamtx_config_path, ffmpeg_path, parent=None):
+        super().__init__(parent)
+        self.mediamtx_path = mediamtx_path
+        self.mediamtx_config_path = mediamtx_config_path
+        self.ffmpeg_path = ffmpeg_path
+
+        self.server_process = None
+        self.video_processes = {}
+
+    @Slot()
+    def start_server(self):
+        # Check if the executable exists
+        if not os.path.exists(self.mediamtx_path):
+            self.server_status_changed.emit("Error: mediamtx.exe not found!")
+            return
+
+        try:
+            # Command now includes the explicit config file path
+            command = [self.mediamtx_path, self.mediamtx_config_path]
+
+            # Use CREATE_NO_WINDOW on Windows to hide the console
+            creation_flags = 0
+            if sys.platform == 'win32':
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
+            self.server_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creation_flags
+            )
+            # A small delay to let the server initialize before we start pushing streams
+            time.sleep(1)
+            self.server_status_changed.emit("Running")
+
+        except Exception as e:
+            self.server_status_changed.emit(f"Error: {e}")
+
+    @Slot(str, str) # Accepts video_path and the local_ip
+    def add_video_stream(self, video_path, local_ip):
+        if not self.server_process or not os.path.exists(self.ffmpeg_path):
+            self.video_stream_failed.emit(os.path.basename(video_path), "Server or ffmpeg not running.")
+            return
+
+        stream_name = os.path.splitext(os.path.basename(video_path))[0].replace(" ", "_")
+
+        command = [
+            self.ffmpeg_path,
+            '-re',
+            '-stream_loop', '-1',
+            '-i', video_path,
+            '-c', 'copy',
+            '-f', 'rtsp',
+            '-rtsp_transport', 'tcp',
+            f'rtsp://localhost:8554/{stream_name}'
+        ]
+
+        try:
+            # Use CREATE_NO_WINDOW on Windows to hide the console
+            creation_flags = 0
+            if sys.platform == 'win32':
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
+            ffmpeg_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creation_flags
+            )
+            self.video_processes[video_path] = ffmpeg_process
+
+            # The final, usable RTSP URL
+            rtsp_url = f"rtsp://{local_ip}:8554/{stream_name}"
+            self.video_stream_added.emit(os.path.basename(video_path), rtsp_url)
+
+        except Exception as e:
+            self.video_stream_failed.emit(os.path.basename(video_path), str(e))
+
+    @Slot()
+    def stop_server(self):
+        # Stop all ffmpeg processes first
+        for path, process in self.video_processes.items():
+            if process.poll() is None: # Check if process is still running
+                process.terminate()
+        self.video_processes.clear()
+
+        # Stop the main mediamtx server
+        if self.server_process and self.server_process.poll() is None:
+            self.server_process.terminate()
+            self.server_process = None
+
+        self.server_status_changed.emit("Stopped")
+        self.manager_stopped.emit()
 
 # Define Column Indices (makes code more readable)
 COL_IP = 0
@@ -1027,11 +1127,23 @@ class PingMonitorWindow(QMainWindow):
         self.setMinimumSize(850, 600) # Reduced minimum height
         self.resize(1200, 700) 
         # Correct path finding for bundled app
-        if getattr(sys, 'frozen', False): base_path = sys._MEIPASS
-        else: base_path = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(base_path, ICON_FILENAME)
+        if getattr(sys, 'frozen', False):
+            self.base_path = sys._MEIPASS
+        else:
+            self.base_path = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(self.base_path, ICON_FILENAME)
         if os.path.exists(icon_path): self.setWindowIcon(QIcon(icon_path))
         else: print(f"Warning: Icon file not found at '{icon_path}'")
+        
+        # --- NEW: Define paths to your executables ---
+        self.mediamtx_path = os.path.join(self.base_path, "mediamtx.exe")
+        self.mediamtx_config_path = os.path.join(self.base_path, "mediamtx.yml")
+        self.ffmpeg_path = os.path.join(self.base_path, "ffmpeg.exe")
+
+        # --- NEW: Add state variables for the new feature ---
+        self.rtsp_manager = None
+        self.rtsp_thread = None
+        self.local_ip = self.get_local_ip() # Helper function we will add
 
         self.headers = ["IP Address", "Status", "Success", "Timeouts", "Unreach.", "Unknown", "Perm. Denied", "Other", "Total Pings", "Open Ports"]
         # === CHANGE: Instantiate the custom model ===
@@ -1110,7 +1222,7 @@ class PingMonitorWindow(QMainWindow):
         self.tray_icon.show()
 
         # Define the full path to the sound file
-        alert_sound_path = os.path.join(base_path, "alert.wav")
+        alert_sound_path = os.path.join(self.base_path, "alert.wav")
 
         # Use the full, resolved path for the sound effect
         self.alert_sound = QSoundEffect()
@@ -1128,6 +1240,18 @@ class PingMonitorWindow(QMainWindow):
         self.check_for_nmap()
     
         # ADD THIS NEW METHOD TO THE PINGMONITORWINDOW CLASS
+    def get_local_ip(self):
+        """Gets the local IP address of the machine."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Doesn't have to be reachable
+            s.connect(('10.255.255.255', 1))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = '127.0.0.1' # Fallback
+        finally:
+            s.close()
+        return ip
     @Slot()
     def _on_benchmark_shutdown_complete(self):
         """
@@ -1770,6 +1894,11 @@ class PingMonitorWindow(QMainWindow):
 
         self.tab_widget.addTab(disk_benchmark_page_widget, "Disk Benchmark")
 
+        # Create HappyTime Page
+        happytime_page_widget = QWidget()
+        self._create_happytime_tab(happytime_page_widget)
+        self.tab_widget.addTab(happytime_page_widget, "HappyTime")
+
         # Add the tab widget to the main layout
         main_layout.addWidget(self.tab_widget)
 
@@ -1778,6 +1907,50 @@ class PingMonitorWindow(QMainWindow):
         self.credit_label.setObjectName("creditLabel")
         self.credit_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.credit_label)
+
+    def _create_happytime_tab(self, parent_widget):
+        layout = QVBoxLayout(parent_widget)
+        
+        # Controls
+        controls_group = QGroupBox("Server Controls")
+        controls_layout = QHBoxLayout(controls_group)
+        
+        self.start_server_button = QPushButton("Start Server")
+        self.start_server_button.setObjectName("startServerButton")
+        controls_layout.addWidget(self.start_server_button)
+        
+        self.stop_server_button = QPushButton("Stop Server")
+        self.stop_server_button.setObjectName("stopServerButton")
+        self.stop_server_button.setEnabled(False)
+        controls_layout.addWidget(self.stop_server_button)
+        
+        self.add_videos_button = QPushButton("Add Videos to Stream")
+        self.add_videos_button.setObjectName("addVideosButton")
+        self.add_videos_button.setEnabled(False)
+        controls_layout.addWidget(self.add_videos_button)
+        
+        layout.addWidget(controls_group)
+        
+        # Status
+        self.status_label_happy = QLabel("Server Status: Stopped")
+        self.status_label_happy.setObjectName("statusLabel")
+        layout.addWidget(self.status_label_happy)
+        
+        # Results Table
+        results_group = QGroupBox("Streaming Videos")
+        results_layout = QVBoxLayout(results_group)
+        
+        self.results_table = QTableWidget()
+        self.results_table.setObjectName("resultsTable")
+        self.results_table.setColumnCount(3)
+        self.results_table.setHorizontalHeaderLabels(["Filename", "Status", "RTSP URL"])
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        results_layout.addWidget(self.results_table)
+        
+        layout.addWidget(results_group)
+        
+        parent_widget.setLayout(layout)
+        self.happytime_page_widget = parent_widget
 
         # Animation setup
         self.status_animation = QPropertyAnimation(self.status_label, b"backgroundColor", self)
@@ -1826,6 +1999,93 @@ class PingMonitorWindow(QMainWindow):
         self.disk_benchmark_browse_button.clicked.connect(self._browse_disk_benchmark_path)
         self.disk_benchmark_clear_button.clicked.connect(self._clear_disk_benchmark_results)
         self.disk_benchmark_export_button.clicked.connect(self._export_disk_benchmark_results)
+        self.start_server_button.clicked.connect(self.start_rtsp_server)
+        self.stop_server_button.clicked.connect(self.stop_rtsp_server)
+        self.add_videos_button.clicked.connect(self.add_videos_to_stream)
+
+    @Slot()
+    def start_rtsp_server(self):
+        # Get the button that was clicked
+        start_button = self.happytime_page_widget.findChild(QPushButton, "startServerButton")
+        stop_button = self.happytime_page_widget.findChild(QPushButton, "stopServerButton")
+        add_videos_button = self.happytime_page_widget.findChild(QPushButton, "addVideosButton")
+
+        start_button.setEnabled(False)
+
+        self.rtsp_thread = QThread()
+        # Pass the specific paths to the manager
+        self.rtsp_manager = RTSPServerManager(
+            self.mediamtx_path,
+            self.mediamtx_config_path,
+            self.ffmpeg_path
+        )
+        self.rtsp_manager.moveToThread(self.rtsp_thread)
+
+        # Connect signals from manager to UI slots
+        self.rtsp_manager.server_status_changed.connect(self.update_rtsp_status)
+        self.rtsp_manager.video_stream_added.connect(self.add_video_to_table)
+        self.rtsp_manager.video_stream_failed.connect(self.handle_video_stream_failure)
+        self.rtsp_manager.manager_stopped.connect(self.rtsp_thread.quit)
+
+        # Thread management
+        self.rtsp_thread.started.connect(self.rtsp_manager.start_server)
+        self.rtsp_thread.finished.connect(self.rtsp_manager.deleteLater)
+        self.rtsp_thread.finished.connect(self.rtsp_thread.deleteLater)
+        self.rtsp_thread.start()
+
+    @Slot()
+    def stop_rtsp_server(self):
+        if self.rtsp_manager:
+            self.rtsp_manager.stop_server()
+
+    @Slot()
+    def add_videos_to_stream(self):
+        if not self.rtsp_manager:
+            QMessageBox.warning(self, "Server Not Running", "Please start the server first.")
+            return
+
+        # Use a file dialog to get video paths
+        video_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Videos to Stream", "", "Video Files (*.mp4 *.mkv *.mov *.avi)"
+        )
+
+        if video_paths:
+            for path in video_paths:
+                # Call the manager's slot, providing the local IP for the URL
+                self.rtsp_manager.add_video_stream(path, self.local_ip)
+
+    @Slot(str)
+    def update_rtsp_status(self, status):
+        status_label = self.happytime_page_widget.findChild(QLabel, "statusLabel")
+        start_button = self.happytime_page_widget.findChild(QPushButton, "startServerButton")
+        stop_button = self.happytime_page_widget.findChild(QPushButton, "stopServerButton")
+        add_videos_button = self.happytime_page_widget.findChild(QPushButton, "addVideosButton")
+
+        status_label.setText(f"Server Status: {status}")
+        if "Running" in status:
+            start_button.setEnabled(False)
+            stop_button.setEnabled(True)
+            add_videos_button.setEnabled(True)
+        else: # Stopped or Error
+            start_button.setEnabled(True)
+            stop_button.setEnabled(False)
+            add_videos_button.setEnabled(False)
+            # Clear the table on stop/error
+            self.happytime_page_widget.findChild(QTableWidget, "resultsTable").setRowCount(0)
+
+    @Slot(str, str)
+    def add_video_to_table(self, filename, rtsp_url):
+        table = self.happytime_page_widget.findChild(QTableWidget, "resultsTable")
+        row_position = table.rowCount()
+        table.insertRow(row_position)
+        table.setItem(row_position, 0, QTableWidgetItem(filename))
+        table.setItem(row_position, 1, QTableWidgetItem("Streaming"))
+        table.setItem(row_position, 2, QTableWidgetItem(rtsp_url))
+        table.item(row_position, 1).setForeground(QBrush(QColor("green")))
+
+    @Slot(str, str)
+    def handle_video_stream_failure(self, filename, error_msg):
+        QMessageBox.critical(self, f"Stream Error: {filename}", f"Could not stream video.\n\nError: {error_msg}")
                     
     def _calculate_camera_storage(self):
         try:
@@ -3427,11 +3687,13 @@ class PingMonitorWindow(QMainWindow):
         """ Handles the window close event more robustly. """
         ping_active = self.monitoring_active or self.stopping_initiated
         api_fetching = bool(self.api_fetch_thread and self.api_fetch_thread.isRunning())
+        rtsp_active = bool(self.rtsp_thread and self.rtsp_thread.isRunning())
 
-        if ping_active or api_fetching:
+        if ping_active or api_fetching or rtsp_active:
             reasons = []
             if ping_active: reasons.append("Monitoring is active or stopping")
             if api_fetching: reasons.append("API IP fetch is in progress")
+            if rtsp_active: reasons.append("HappyTime server is running")
             reason_text = " and ".join(reasons)
 
             reply = QMessageBox.question(self, "Exit Confirmation",
@@ -3442,9 +3704,11 @@ class PingMonitorWindow(QMainWindow):
                 self._log_event_gui(f"Exit confirmed by user while: {reason_text}. Stopping...", "warning") # Direct log
                 event.ignore() # Ignore the first close event
 
-                # Initiate stop cleanly
+                # Initiate stop cleanly for all services
                 if ping_active and not self.stopping_initiated:
                     self._initiate_stop()
+                if rtsp_active:
+                    self.stop_rtsp_server()
 
                 # Try to abort API fetch (may not be instant)
                 if api_fetching and self.api_fetch_thread:
