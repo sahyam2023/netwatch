@@ -75,7 +75,7 @@ def is_admin():
 
 class RTSPServerManager(QObject):
     server_status_changed = Signal(str)
-    video_stream_added = Signal(str, str)
+    video_stream_added = Signal(str, str, str, float) # filepath, filename, url, duration_seconds
     video_stream_failed = Signal(str, str) # We will now use this signal correctly
     manager_stopped = Signal()
 
@@ -88,6 +88,24 @@ class RTSPServerManager(QObject):
         self.server_process = None
         self.video_processes = {}
         # --- REMOVED: self.monitor_threads is no longer needed ---
+
+    def _get_video_duration(self, video_path):
+        """Uses ffprobe to get the duration of a video file in seconds."""
+        command = [
+            # NOTE: You may need to provide the full path to ffprobe.exe as well
+            os.path.join(os.path.dirname(self.ffmpeg_path), "ffprobe.exe"),
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        try:
+            # Use subprocess.run for short-lived commands that we need the output from
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            return float(result.stdout.strip())
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
+            print(f"Could not get duration for {video_path}: {e}")
+            return 0.0 # Return 0 if duration can't be found
 
     @Slot()
     def start_server(self):
@@ -115,10 +133,21 @@ class RTSPServerManager(QObject):
             self.video_stream_failed.emit(os.path.basename(video_path), "Server or ffmpeg not running.")
             return
 
+        # --- NEW: Get duration before starting the stream ---
+        duration = self._get_video_duration(video_path)
+        if duration == 0:
+            self.video_stream_failed.emit(os.path.basename(video_path), "Could not determine video duration.")
+            return
+
         stream_name = os.path.splitext(os.path.basename(video_path))[0].replace(" ", "_")
         command = [
-            self.ffmpeg_path, '-re', '-stream_loop', '-1', '-i', video_path,
-            '-c', 'copy', '-f', 'rtsp', '-rtsp_transport', 'tcp',
+            self.ffmpeg_path,
+            '-stream_loop', '-1',
+            '-re',
+            '-i', video_path,
+            '-c', 'copy',
+            '-f', 'rtsp',
+            '-rtsp_transport', 'tcp',
             f'rtsp://localhost:8554/{stream_name}'
         ]
 
@@ -139,10 +168,66 @@ class RTSPServerManager(QObject):
 
             # The final, usable RTSP URL
             rtsp_url = f"rtsp://{local_ip}:8554/{stream_name}"
-            self.video_stream_added.emit(os.path.basename(video_path), rtsp_url)
+            self.video_stream_added.emit(video_path, os.path.basename(video_path), rtsp_url, duration)
 
         except Exception as e:
             self.video_stream_failed.emit(os.path.basename(video_path), str(e))
+
+    @Slot(str, float)
+    def seek_video_stream(self, video_path, seek_time_seconds):
+        """Terminates and restarts an ffmpeg stream at a specific time."""
+        # 1. Terminate the old process if it exists
+        if video_path in self.video_processes:
+            old_process = self.video_processes.pop(video_path, None)
+            if old_process and old_process.poll() is None:
+                old_process.terminate()
+                old_process.wait(timeout=2) # Wait briefly for it to close
+
+        # 2. Start a new process with the -ss argument
+        stream_name = os.path.splitext(os.path.basename(video_path))[0].replace(" ", "_")
+        
+        # *** The key change is adding '-ss' BEFORE '-i' for fast seeking ***
+        command = [
+        self.ffmpeg_path,
+        '-re',
+        '-ss', str(seek_time_seconds),  # SEEK to the desired time (as an input option)
+        '-i', video_path,              # THEN specify the input file
+        '-c', 'copy',                  # Use your low-CPU copy mode
+        '-f', 'rtsp',
+        '-rtsp_transport', 'tcp',
+        f'rtsp://localhost:8554/{stream_name}'
+    ]
+        try:
+            creation_flags = 0
+            if sys.platform == 'win32':
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
+            new_ffmpeg_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creation_flags,
+                text=True
+            )
+            # Store the new process
+            self.video_processes[video_path] = new_ffmpeg_process
+            print(f"Successfully restarted stream for {video_path} at {seek_time_seconds}s")
+
+            # Start a thread to monitor the stderr of the new process
+            stderr_thread = threading.Thread(target=self._monitor_stderr, args=(new_ffmpeg_process, video_path))
+            stderr_thread.daemon = True
+            stderr_thread.start()
+
+        except Exception as e:
+            print(f"Failed to restart stream for {video_path}: {e}")
+            # Optionally emit a failure signal here
+
+    def _monitor_stderr(self, process, video_path):
+        """Monitors and prints the stderr from a process."""
+        if process.stderr:
+            for line in iter(process.stderr.readline, ''):
+                print(f"[ffmpeg stderr - {os.path.basename(video_path)}]: {line.strip()}")
+            process.stderr.close()
 
     @Slot()
     def stop_server(self):
@@ -1921,6 +2006,21 @@ class PingMonitorWindow(QMainWindow):
         self.status_label_happy.setObjectName("statusLabel")
         layout.addWidget(self.status_label_happy)
         
+        # --- NEW: Playback Controls Group (Initially Hidden) ---
+        self.playback_controls_group = QGroupBox("Playback Controls")
+        playback_layout = QGridLayout(self.playback_controls_group)
+        
+        self.video_name_label = QLabel("Video: (select a stream)")
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.time_label = QLabel("00:00 / 00:00")
+        
+        playback_layout.addWidget(self.video_name_label, 0, 0, 1, 2)
+        playback_layout.addWidget(self.seek_slider, 1, 0)
+        playback_layout.addWidget(self.time_label, 1, 1)
+
+        layout.addWidget(self.playback_controls_group)
+        self.playback_controls_group.hide() # Hide it by default
+
         # Results Table
         results_group = QGroupBox("Streaming Videos")
         results_layout = QVBoxLayout(results_group)
@@ -1930,6 +2030,8 @@ class PingMonitorWindow(QMainWindow):
         self.results_table.setColumnCount(3)
         self.results_table.setHorizontalHeaderLabels(["Filename", "Status", "RTSP URL"])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.SingleSelection)
         results_layout.addWidget(self.results_table)
         
         layout.addWidget(results_group)
@@ -1987,6 +2089,9 @@ class PingMonitorWindow(QMainWindow):
         self.start_server_button.clicked.connect(self.start_rtsp_server)
         self.stop_server_button.clicked.connect(self.stop_rtsp_server)
         self.add_videos_button.clicked.connect(self.add_videos_to_stream)
+        self.results_table.itemSelectionChanged.connect(self._on_happytime_selection_changed)
+        self.seek_slider.sliderReleased.connect(self._on_seek_slider_released)
+        self.seek_slider.valueChanged.connect(self._update_time_label)
 
     @Slot()
     def start_rtsp_server(self):
@@ -2058,15 +2163,67 @@ class PingMonitorWindow(QMainWindow):
             # Clear the table on stop/error
             self.happytime_page_widget.findChild(QTableWidget, "resultsTable").setRowCount(0)
 
-    @Slot(str, str)
-    def add_video_to_table(self, filename, rtsp_url):
+    @Slot(str, str, str, float)
+    def add_video_to_table(self, filepath, filename, rtsp_url, duration):
+        # ... (existing code to add a row) ...
         table = self.happytime_page_widget.findChild(QTableWidget, "resultsTable")
         row_position = table.rowCount()
         table.insertRow(row_position)
-        table.setItem(row_position, 0, QTableWidgetItem(filename))
+        
+        # Store the full path and duration in the first item using UserRole
+        filename_item = QTableWidgetItem(filename)
+        filename_item.setData(Qt.UserRole, filepath) # Store full path
+        filename_item.setData(Qt.UserRole + 1, duration) # Store duration
+        
+        table.setItem(row_position, 0, filename_item)
         table.setItem(row_position, 1, QTableWidgetItem("Streaming"))
         table.setItem(row_position, 2, QTableWidgetItem(rtsp_url))
         table.item(row_position, 1).setForeground(QBrush(QColor("green")))
+
+    @Slot()
+    def _on_happytime_selection_changed(self):
+        selected_items = self.results_table.selectedItems()
+        if not selected_items:
+            self.playback_controls_group.hide()
+            return
+
+        # Get the item from the first column of the selected row
+        filename_item = self.results_table.item(selected_items[0].row(), 0)
+        filename = filename_item.text()
+        duration = filename_item.data(Qt.UserRole + 1)
+
+        self.video_name_label.setText(f"Video: {filename}")
+        self.seek_slider.setMaximum(int(duration))
+        self.seek_slider.setValue(0) # Reset slider to start
+        self._update_time_label(0) # Update the time display
+        self.playback_controls_group.show()
+
+    @Slot()
+    def _on_seek_slider_released(self):
+        """Called when the user releases the mouse from the slider."""
+        print("Seek slider released!")
+        if not self.rtsp_manager:
+            return
+
+        selected_items = self.results_table.selectedItems()
+        if not selected_items:
+            return
+
+        # Get the stored full file path and the seek time
+        filename_item = self.results_table.item(selected_items[0].row(), 0)
+        video_path = filename_item.data(Qt.UserRole)
+        seek_time = self.seek_slider.value()
+
+        # Tell the manager to perform the seek
+        QTimer.singleShot(250, lambda: self.rtsp_manager.seek_video_stream(video_path, seek_time))
+
+    @Slot(int)
+    def _update_time_label(self, value):
+        """Updates the time label as the slider moves."""
+        duration = self.seek_slider.maximum()
+        current_time_str = str(datetime.timedelta(seconds=value))
+        total_time_str = str(datetime.timedelta(seconds=duration))
+        self.time_label.setText(f"{current_time_str} / {total_time_str}")
 
     @Slot(str, str)
     def handle_video_stream_failure(self, filename, error_msg):
