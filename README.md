@@ -1,4 +1,4 @@
-## PingWatch: Advanced Network & System Diagnostics Tool
+## NetWatch: Advanced Network & System Diagnostics Tool
 
 PingWatch is a powerful, multi-featured desktop application built with Python and PyQt5, designed for network administrators, developers, and IT professionals. It provides a comprehensive suite of tools for real-time network monitoring, system benchmarking, and in-depth troubleshooting, all within a single, intuitive graphical user interface.
 
